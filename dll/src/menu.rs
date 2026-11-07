@@ -212,12 +212,13 @@ enum Id {
     /// Silent Aim > Show FOV Circle and Priority.
     SilentCircle,
     SilentPriority,
-    /// Silent Aim > Magic Bullets, No Range Loss, Instant Hit.
+    /// Self > Weapons > Magic Bullets and No Bullet Drop (they ride Silent Aim's hook, so they live
+    /// in `silentaim.rs`).
     SilentMagic,
+    SilentNoDrop,
+    /// Silent Aim > No Range Loss, Instant Hit.
     SilentNoRange,
     SilentInstant,
-    /// Self > Weapons > No Bullet Drop (it rides Silent Aim's hook, so it lives in `silentaim.rs`).
-    SilentNoDrop,
     GearValue,
     /// Gear Score: the player's gear level, the item in a slot (`gearscore::SLOTS`), all the player
     /// owns.
@@ -1314,9 +1315,12 @@ fn items_of(page: Page, prefs: Prefs) -> Vec<Item> {
         Page::Weapon => vec![
             item(Id::NoRecoil, "No Recoil", Kind::Toggle(crate::weapon::recoil_on()), ""),
             item(Id::Accuracy, "No Spread", Kind::Toggle(crate::weapon::accuracy_on()), ""),
-            // No Bullet Drop under No Spread, No Scoped Sway over Infinite Mag, Infinite Reserve under it.
+            // No Bullet Drop under No Spread and Magic Bullets under it; No Scoped Sway over Infinite
+            // Mag, Infinite Reserve under it.
             item(Id::SilentNoDrop, "No Bullet Drop", Kind::Toggle(crate::silentaim::no_drop()), "Your shots fly straight, with no drop over distance.
 All your shots, Silent Aim on or off."),
+            item(Id::SilentMagic, "Magic Bullets", Kind::Toggle(crate::silentaim::magic()), "Your shots go through anything in the way
+and hit whatever is in your crosshair, whoever it is."),
             item(Id::NoSway, "No Scoped Sway", Kind::Toggle(crate::weapon::sway_on()), ""),
             item(Id::Ammo, "Infinite Mag", Kind::Toggle(crate::weapon::ammo_on()), ""),
             item(Id::Reserve, "Infinite Reserve", Kind::Toggle(crate::weapon::reserve_on()), ""),
@@ -1333,8 +1337,6 @@ Never players, co-op players included. Never animals."),
 What is inside it can be picked."),
             item(Id::SilentPriority, "Priority", Kind::Choice(crate::silentaim::priority().name().into()), "Which target inside the circle goes first:
 Crosshair (nearest the crosshair), Nearest or Farthest from you."),
-            item(Id::SilentMagic, "Magic Bullets", Kind::Toggle(crate::silentaim::magic()), "Steered shots go through walls to the target.
-Not when a player is near the line. Needs Silent Aim on."),
             item(Id::SilentNoRange, "No Range Loss", Kind::Toggle(crate::silentaim::no_range()), "Your shots keep their damage at any distance.
 Not while a player is near your crosshair. Needs Silent Aim on."),
             item(Id::SilentInstant, "Instant Hit", Kind::Toggle(crate::silentaim::instant()), "Your shots arrive at once.
@@ -1985,7 +1987,10 @@ fn activate(st: &mut State, it: &Item) {
             switched(st, crate::silentaim::set(on), if on { "Silent aim on" } else { "Silent aim off" });
         }
         Id::SilentCircle => crate::silentaim::set_circle(!crate::silentaim::circle()),
-        Id::SilentMagic => crate::silentaim::set_magic(!crate::silentaim::magic()),
+        Id::SilentMagic => {
+            let on = !crate::silentaim::magic();
+            switched(st, crate::silentaim::set_magic(on), if on { "Magic bullets on" } else { "Magic bullets off" });
+        }
         Id::SilentNoRange => crate::silentaim::set_no_range(!crate::silentaim::no_range()),
         Id::SilentInstant => crate::silentaim::set_instant(!crate::silentaim::instant()),
         Id::SilentNoDrop => {
@@ -4832,9 +4837,13 @@ fn gone(addr: &str) -> bool {
 
 static GONE_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Rows that moved down into a list of their own name: only the address itself, since every row in
-/// the new list starts with the old address.
-const MOVED_EXACT: [(&str, &str); 1] = [("Self > Progress > Credits", "Self > Progress > Credits > Credits")];
+/// Rows that moved down into a list of their own name (only the address itself, since every row in
+/// the new list starts with the old address), and a row that left its list on its own.
+const MOVED_EXACT: [(&str, &str); 2] = [
+    ("Self > Progress > Credits", "Self > Progress > Credits > Credits"),
+    // Magic Bullets left Silent Aim's list for Weapons: all shots, no Silent Aim needed.
+    ("Aurora > Experiments > Silent Aim > Magic Bullets", "Self > Weapons > Magic Bullets"),
+];
 
 /// Where a row that moved lives now; None when it did not move. A row that moved more than once
 /// follows each move (Menu > Appearance > Menu Colour went to Menu > Settings > Appearance, then
@@ -5192,7 +5201,9 @@ fn default_of(st: &mut State, id: Id) {
         Id::SilentFov => crate::silentaim::set_fov(crate::silentaim::FOV_DEFAULT),
         Id::SilentRange => crate::silentaim::set_range_m(crate::silentaim::RANGE_DEFAULT),
         Id::SilentCircle => crate::silentaim::set_circle(true),
-        Id::SilentMagic => crate::silentaim::set_magic(false),
+        Id::SilentMagic => {
+            let _ = crate::silentaim::set_magic(false);
+        }
         Id::SilentNoRange => crate::silentaim::set_no_range(false),
         Id::SilentInstant => crate::silentaim::set_instant(false),
         Id::SilentNoDrop => {
@@ -6326,7 +6337,7 @@ fn unwait(id: Id) -> bool {
 /// Switches that work on the player's character or hook the game's code: not before the player is
 /// in the world and the start-up code searches are done (the launcher's writes wait for the same).
 fn needs_world(id: Id) -> bool {
-    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentNoDrop | Id::Damage | Id::FireRate)
+    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoDrop | Id::Damage | Id::FireRate)
 }
 
 fn world_ready() -> bool {
@@ -6933,6 +6944,7 @@ mod tests {
             ("No Recoil", Tog),
             ("No Spread", Tog),
             ("No Bullet Drop", TogIs(false)),
+            ("Magic Bullets", TogIs(false)),
             ("No Scoped Sway", Tog),
             ("Infinite Mag", Tog),
             ("Infinite Reserve", Tog),
@@ -6945,7 +6957,6 @@ mod tests {
             ("Silent Aim Range", ValIs("300 m")),
             ("Show FOV Circle", TogIs(true)),
             ("Priority", ValIs("Crosshair")),
-            ("Magic Bullets", TogIs(false)),
             ("No Range Loss", TogIs(false)),
             ("Instant Hit", TogIs(false)),
         ]);
@@ -7478,9 +7489,9 @@ World
     fn weapon_rows_and_new_switches() {
         let prefs = test_prefs();
         let names: Vec<String> = items(Page::Weapon, prefs).into_iter().map(|i| i.row.text).collect();
-        assert_eq!(names, ["No Recoil", "No Spread", "No Bullet Drop", "No Scoped Sway", "Infinite Mag", "Infinite Reserve", "Damage Multiplier", "Fire Rate"]);
+        assert_eq!(names, ["No Recoil", "No Spread", "No Bullet Drop", "Magic Bullets", "No Scoped Sway", "Infinite Mag", "Infinite Reserve", "Damage Multiplier", "Fire Rate"]);
         let names: Vec<String> = items(Page::SilentAim, prefs).into_iter().map(|i| i.row.text).collect();
-        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority", "Magic Bullets", "No Range Loss", "Instant Hit"]);
+        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority", "No Range Loss", "Instant Hit"]);
         assert_eq!(command(Id::SilentAim).as_deref(), Some("silentaim"));
         assert_eq!(command(Id::SilentFov).as_deref(), Some("silentaimfov"));
         assert_eq!(command(Id::SilentRange).as_deref(), Some("silentaimrange"));
@@ -7495,7 +7506,7 @@ World
         assert_eq!(default_state(Id::SilentPriority).as_deref(), Some("Crosshair"));
         assert!([Id::SilentAim, Id::SilentFov, Id::SilentRange, Id::SilentCircle, Id::SilentPriority].into_iter().all(has_default));
         assert!(!needs_world(Id::SilentCircle) && !needs_world(Id::SilentPriority));
-        // The three shot switches and No Bullet Drop: off at inject, their own commands.
+        // The shot switches: off at inject, their own commands.
         for (id, c) in [(Id::SilentMagic, "magicbullets"), (Id::SilentNoRange, "norangeloss"), (Id::SilentInstant, "instanthit"), (Id::SilentNoDrop, "nobulletdrop")] {
             assert_eq!(command(id).as_deref(), Some(c));
             assert_eq!(default_state(id), Some(on_off(false)));
@@ -7505,7 +7516,9 @@ World
         // Experiments.
         assert_eq!(moved("Self > Weapons > Silent Aim FOV").as_deref(), Some("Aurora > Experiments > Silent Aim > Silent Aim FOV"));
         assert_eq!(moved("Self > Weapons > Silent Aim Range").as_deref(), Some("Aurora > Experiments > Silent Aim > Silent Aim Range"));
-        assert_eq!(moved("Self > Weapons > Silent Aim > Magic Bullets").as_deref(), Some("Aurora > Experiments > Silent Aim > Magic Bullets"));
+        // Magic Bullets came back out of the list into Weapons.
+        assert_eq!(moved("Self > Weapons > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Magic Bullets"));
+        assert_eq!(moved("Aurora > Experiments > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Magic Bullets"));
         assert_eq!(moved("Self > Weapons > Silent Aim").as_deref(), Some("Aurora > Experiments > Silent Aim"));
         assert_eq!(moved("Self > Weapons > No Recoil"), None);
         let on = Prefs { experimental: true, ..prefs };
@@ -7517,11 +7530,14 @@ World
             assert_eq!(resolve(addr, on).map(|f| f.item.id), Some(id), "{addr}");
             assert!(resolve(addr, prefs).is_none(), "{addr} while off");
         }
-        assert!(needs_world(Id::SilentAim) && needs_world(Id::SilentNoDrop) && !needs_world(Id::SilentFov));
-        // No Bullet Drop is a weapon row: there with the switch off, and kept in profiles.
-        let nd = resolve("Self > Weapons > No Bullet Drop", prefs).expect("No Bullet Drop");
-        assert_eq!(nd.item.id, Id::SilentNoDrop);
-        assert_eq!(profile_state(&nd, prefs).as_deref(), Some("Off"));
+        assert!(needs_world(Id::SilentAim) && needs_world(Id::SilentNoDrop) && needs_world(Id::SilentMagic) && !needs_world(Id::SilentFov));
+        // No Bullet Drop and Magic Bullets are weapon rows: there with the switch off, and kept in
+        // profiles.
+        for (addr, id) in [("Self > Weapons > No Bullet Drop", Id::SilentNoDrop), ("Self > Weapons > Magic Bullets", Id::SilentMagic)] {
+            let f = resolve(addr, prefs).expect(addr);
+            assert_eq!(f.item.id, id);
+            assert_eq!(profile_state(&f, prefs).as_deref(), Some("Off"), "{addr}");
+        }
         assert_eq!(command(Id::FireRate).as_deref(), Some("firerate"));
         assert_eq!(command(Id::Reserve).as_deref(), Some("infinitereserve"));
         assert_eq!(default_state(Id::Reserve), Some(on_off(false)));

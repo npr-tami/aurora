@@ -38,7 +38,8 @@
 //! - whether the direction given here is the one the bullet flies (the path points are made before
 //!   this call, and moved into the world here with this direction: likely, not seen);
 //! - bullet drop: the direction is straight at the point, with no lead for drop or a moving target;
-//! - walls are not checked: a target behind cover takes the player's shot into the cover.
+//! - walls are not checked by the steering: a target behind cover takes the player's shot into
+//!   the cover, unless Magic Bullets is on.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -72,7 +73,11 @@ const COUNT_AT: u64 = 0x2E0;
 const FEAT_AT: u64 = 0x2E4;
 const ALL_AT: u64 = 0x2E8;
 const BLOCK: usize = 0x300;
-/// The feature word's bits (the worker sets them every tick; 0 when off or a player is in the way).
+/// The feature word's bits. No Range Loss and Instant Hit: the worker sets them every tick while
+/// Silent Aim is on (0 when off or a player is in the way). Magic Bullets and No Bullet Drop stand
+/// on their own (`standing`), Silent Aim on or off, for all the player's shots.
+/// Magic Bullets: the shot keeps its wall budget, so it goes through whatever is in the way and
+/// hits the first character on its line, whoever that is.
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
 const FEAT_INSTANT: u32 = 4;
@@ -104,9 +109,7 @@ const SHOT_LOCAL_COUNT: u32 = 0x16a;
 /// A point's height sits this far into it.
 const POINT_UP: u8 = 4;
 const POINT_SIZE: u8 = 12;
-/// Magic Bullets skips a shot when a player is this close to the line from the player to the target
-/// (world units); the others skip while a player is this near the crosshair (degrees).
-const PLAYER_LINE_UNITS: f64 = 2.0;
+/// No Range Loss and Instant Hit skip a shot while a player is this near the crosshair (degrees).
 const PLAYER_AIM_DEG: f64 = 10.0;
 /// In a shot object (research\docs\shot-trace.md): its origin as it keeps it, and its
 /// position this frame (float4 each); its speed and range (f32), read for the log.
@@ -170,14 +173,14 @@ static RANGE: AtomicU32 = AtomicU32::new(0);
 static ON: AtomicBool = AtomicBool::new(false);
 /// Silent Aim Circle: shown while Silent Aim is on. Shown at inject.
 static CIRCLE_HIDDEN: AtomicBool = AtomicBool::new(false);
-/// Magic Bullets, No Range Loss, Instant Hit: the player's shots only, while Silent Aim is on (they
-/// ride its hook). Off at inject.
-static MAGIC: AtomicBool = AtomicBool::new(false);
+/// No Range Loss, Instant Hit: the player's shots only, while Silent Aim is on (they ride its
+/// hook). Off at inject.
 static NO_RANGE: AtomicBool = AtomicBool::new(false);
 static INSTANT: AtomicBool = AtomicBool::new(false);
-/// No Bullet Drop: all the player's shots fly straight, Silent Aim on or off. It needs the jump in,
-/// so it keeps the hook in while Silent Aim is off (no worker then: the feature word holds its bit
-/// alone). Off at inject.
+/// Magic Bullets and No Bullet Drop: all the player's shots, Silent Aim on or off. They need the
+/// jump in, so they keep the hook in while Silent Aim is off (no worker then: the feature word
+/// holds their bits alone, `standing`). Off at inject.
+static MAGIC: AtomicBool = AtomicBool::new(false);
 static NO_DROP: AtomicBool = AtomicBool::new(false);
 /// Silent Aim is on (the switch, not the jump: `ON` is the jump, which No Bullet Drop shares).
 static AIM: AtomicBool = AtomicBool::new(false);
@@ -244,9 +247,9 @@ pub fn magic() -> bool {
     MAGIC.load(Ordering::Relaxed)
 }
 
-pub fn set_magic(on: bool) {
-    MAGIC.store(on, Ordering::Relaxed);
-    log(&format!("magic bullets {}", if on { "on" } else { "off" }));
+/// Magic Bullets on or off (as `set_no_drop`).
+pub fn set_magic(on: bool) -> Result<(), String> {
+    set_standing(&MAGIC, on, "magic bullets", "Magic Bullets")
 }
 
 pub fn no_range() -> bool {
@@ -271,75 +274,68 @@ pub fn no_drop() -> bool {
     NO_DROP.load(Ordering::Relaxed)
 }
 
-/// No Bullet Drop on or off. On: the jump goes in (if Silent Aim has not put it in already) and,
-/// with no worker running, the feature word gets its bit. Off: the bit goes, and the jump too
-/// unless Silent Aim still wants it.
+/// No Bullet Drop on or off (as `set_magic`).
 pub fn set_no_drop(on: bool) -> Result<(), String> {
+    set_standing(&NO_DROP, on, "no bullet drop", "No Bullet Drop")
+}
+
+/// The feature bits that stand without Silent Aim's worker: Magic Bullets and No Bullet Drop.
+fn standing() -> u32 {
+    (u32::from(magic()) * FEAT_MAGIC) | (u32::from(no_drop()) * FEAT_NODROP)
+}
+
+/// A switch that stands on its own (Magic Bullets, No Bullet Drop) on or off. On: the jump goes in
+/// (if Silent Aim has not put it in already) and, with no worker running, the feature word gets
+/// the standing bits. Off: its bit goes, and the jump too unless Silent Aim or the other switch
+/// still wants it.
+fn set_standing(flag: &AtomicBool, on: bool, what: &str, name: &str) -> Result<(), String> {
     let _one = SWITCH.lock().map_err(|_| "silent aim lock")?;
     if on {
         if BAD.load(Ordering::Relaxed) {
-            return Err("No Bullet Drop is off for this session (see the log)".into());
+            return Err(format!("{name} is off for this session (see the log)"));
         }
         let block = jump_in()?;
-        NO_DROP.store(true, Ordering::SeqCst);
+        flag.store(true, Ordering::SeqCst);
         if !is_on() {
-            write_feat(block, FEAT_NODROP);
+            write_feat(block, standing());
         }
-        log("no bullet drop on");
+        log(&format!("{what} on"));
     } else {
-        NO_DROP.store(false, Ordering::SeqCst);
+        flag.store(false, Ordering::SeqCst);
         let Ok(mut slot) = HOOK.lock() else { return Err("silent aim lock".into()) };
         if let Some(h) = slot.as_mut()
             && !is_on()
         {
-            write_feat(h.block, 0);
-            if h.on && let Err(e) = swap(h, false) {
+            let keep = standing();
+            write_feat(h.block, keep);
+            if keep == 0 && h.on && let Err(e) = swap(h, false) {
                 log(&format!("silent aim: {e}"));
             }
         }
-        log("no bullet drop off");
+        log(&format!("{what} off"));
     }
     Ok(())
 }
 
-/// Is a player within `r` of the line from `a` to `b` (Magic Bullets would send the player's shot
-/// through walls along it)?
-pub fn player_near_line(a: [f64; 3], b: [f64; 3], players: &[[f64; 3]], r: f64) -> bool {
-    let ab = sub(b, a);
-    let l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
-    players.iter().any(|p| {
-        let ap = sub(*p, a);
-        let t = if l2 > 1e-9 { ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / l2).clamp(0.0, 1.0) } else { 0.0 };
-        let q = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
-        let d = len(sub(*p, q));
-        d.is_nan() || d <= r
-    })
-}
-
-/// Is a player within `deg` of the player's crosshair (from `eye` along `fwd`)?
+/// Is a player within `deg` of the player's crosshair (from `eye` along `fwd`)? A position that is
+/// not a number counts as in the way.
 pub fn player_near_aim(eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], deg: f64) -> bool {
     players.iter().any(|p| {
         let a = angle_deg(eye, fwd, *p);
-        a.is_nan() || a <= deg
+        !p.iter().all(|v| v.is_finite()) || a.is_nan() || a <= deg
     })
 }
 
-/// The feature word for this tick: each switch on, and nobody in the way. Magic Bullets only with a
-/// target and no player near the line to it; the others not while a player is near the player's
-/// crosshair. Never anything for a shot that could reach a player.
-pub fn features(target: Option<[f64; 3]>, eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], on: (bool, bool, bool)) -> u32 {
+/// The worker's part of the feature word for this tick: No Range Loss and Instant Hit, each when
+/// its switch is on and no player is near the player's crosshair. Never anything for a shot that
+/// could reach a player. (Magic Bullets and No Bullet Drop are `standing`, not the worker's.)
+pub fn features(eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], on: (bool, bool)) -> u32 {
     let mut f = 0;
-    if on.0
-        && let Some(t) = target
-        && !player_near_line(eye, t, players, PLAYER_LINE_UNITS)
-    {
-        f |= FEAT_MAGIC;
-    }
     let clear = !player_near_aim(eye, fwd, players, PLAYER_AIM_DEG);
-    if on.1 && clear {
+    if on.0 && clear {
         f |= FEAT_RANGE;
     }
-    if on.2 && clear {
+    if on.1 && clear {
         f |= FEAT_INSTANT;
     }
     f
@@ -582,8 +578,8 @@ pub fn range_units(m: f64) -> f64 {
 /// are kept for the log and a count goes up; then, in a frame of our own, the game's function is
 /// called, with our direction (to the target) when "on" is set and the target is far enough from
 /// the origin, else with the game's own. After it returns, the feature word's writes go into the
-/// player's shot (Magic Bullets only on a steered shot): they come after the game's own set-up, so
-/// it can't overwrite them. The game's return value (rax) is kept.
+/// player's shot: they come after the game's own set-up, so it can't overwrite them. The game's
+/// return value (rax) is kept.
 fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     let mut c: Vec<u8> = Vec::new();
     // Near jumps (0F 8x rel32) to GO and to NOSTEER, patched at the end.
@@ -639,7 +635,7 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     let r = rip(&c, cave + ALL_AT)?;
     c.extend_from_slice(&r);
     // A frame of our own: home space, the player's stack slots 5 to 7 copied (should the function
-    // take more than its three), our direction at +0x40, the shot at +0x50, "steered" at +0x58.
+    // take more than its three), our direction at +0x40, the shot at +0x50.
     c.extend_from_slice(&[0x48, 0x83, 0xEC, FRAME]); // Sub rsp, FRAME
     for (from, to) in [(u32::from(FRAME) + 0x28, 0x20u8), (u32::from(FRAME) + 0x30, 0x28), (u32::from(FRAME) + 0x38, 0x30)] {
         c.extend_from_slice(&[0x48, 0x8B, 0x84, 0x24]); // Mov rax, [rsp+from]
@@ -647,7 +643,6 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
         c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, to]); // Mov [rsp+to], rax
     }
     c.extend_from_slice(&[0x48, 0x89, 0x4C, 0x24, 0x50]); // Mov [rsp+0x50], rcx
-    c.extend_from_slice(&[0xC6, 0x44, 0x24, 0x58, 0x00]); // Mov byte [rsp+0x58], 0
     // Steer? Mov eax, [rip+on]; test eax, eax; jz NOSTEER
     c.extend_from_slice(&[0x8B, 0x05]);
     let r = rip(&c, cave + ON_AT)?;
@@ -687,7 +682,6 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&r);
     c.extend_from_slice(&[0x0F, 0x11, 0x44, 0x24, 0x40]); // Movups [rsp+0x40], xmm0
     c.extend_from_slice(&[0x4C, 0x8D, 0x44, 0x24, 0x40]); // Lea r8, [rsp+0x40]
-    c.extend_from_slice(&[0xC6, 0x44, 0x24, 0x58, 0x01]); // Mov byte [rsp+0x58], 1
     // NOSTEER: No Bullet Drop first (the gravity curve out of the local path points, before the game
     // turns them into the world; the direction at r8 gives the pitch to keep), then call TRAMP (rcx,
     // rdx untouched; r8 ours or the game's).
@@ -703,15 +697,9 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&[0x44, 0x8B, 0x15]); // Mov r10d, [rip+feat]
     let r = rip(&c, cave + FEAT_AT)?;
     c.extend_from_slice(&r);
-    // Each feature: test r10d, bit; jz past; (Magic: cmp byte [rsp+0x58], 0; je past;) mov dword
-    // [rcx+off], value.
-    for (bit, writes, steered_only) in feature_writes() {
+    // Each feature: test r10d, bit; jz past; mov dword [rcx+off], value.
+    for (bit, writes) in feature_writes() {
         let mut body: Vec<u8> = Vec::new();
-        if steered_only {
-            body.extend_from_slice(&[0x80, 0x7C, 0x24, 0x58, 0x00]); // Cmp byte [rsp+0x58], 0
-            let skip: usize = writes.iter().map(|(off, _)| if *off < 0x80 { 7 } else { 10 }).sum();
-            body.extend_from_slice(&[0x74, skip as u8]); // Je past
-        }
         for (off, val) in writes {
             if off < 0x80 {
                 body.extend_from_slice(&[0xC7, 0x41, off as u8]); // Mov dword [rcx+off8], imm32
@@ -824,14 +812,14 @@ fn flatten_code(feat: [u8; 4]) -> Vec<u8> {
 }
 
 /// The feature word's bits, and what each writes into the player's shot after the game set it up:
-/// (bit, [(offset, f32 bits)], only on a steered shot).
-type FeatureWrite = (u32, Vec<(u32, u32)>, bool);
+/// (bit, [(offset, f32 bits)]).
+type FeatureWrite = (u32, Vec<(u32, u32)>);
 
 fn feature_writes() -> [FeatureWrite; 3] {
     [
-        (FEAT_MAGIC, vec![(SHOT_ENERGY as u32, MAGIC_ENERGY.to_bits())], true),
-        (FEAT_RANGE, vec![(SHOT_RANGE as u32, BIG_RANGE.to_bits())], false),
-        (FEAT_INSTANT, vec![(SHOT_SPEED as u32, INSTANT_SPEED.to_bits()), (SHOT_SPEED3 as u32, (INSTANT_SPEED / 3.0).to_bits())], false),
+        (FEAT_MAGIC, vec![(SHOT_ENERGY as u32, MAGIC_ENERGY.to_bits())]),
+        (FEAT_RANGE, vec![(SHOT_RANGE as u32, BIG_RANGE.to_bits())]),
+        (FEAT_INSTANT, vec![(SHOT_SPEED as u32, INSTANT_SPEED.to_bits()), (SHOT_SPEED3 as u32, (INSTANT_SPEED / 3.0).to_bits())]),
     ]
 }
 
@@ -1015,8 +1003,8 @@ fn jump_in() -> Result<u64, String> {
 }
 
 /// Silent Aim off: no target, the worker told to stop (not waited for: the worker calls this
-/// itself), and the jump out, unless No Bullet Drop still needs it (then the feature word keeps
-/// that bit alone).
+/// itself), and the jump out, unless Magic Bullets or No Bullet Drop still needs it (then the
+/// feature word keeps their bits alone).
 fn switch_off(why: &str) {
     let Ok(_one) = SWITCH.lock() else { return };
     RUN.store(false, Ordering::SeqCst);
@@ -1024,10 +1012,11 @@ fn switch_off(why: &str) {
     let Ok(mut slot) = HOOK.lock() else { return };
     let Some(h) = slot.as_mut() else { return };
     write_target(h.block, None);
-    if no_drop() {
-        write_feat(h.block, FEAT_NODROP);
+    let keep = standing();
+    if keep != 0 {
+        write_feat(h.block, keep);
         if h.on {
-            log(&format!("silent aim {why}; no bullet drop keeps the hook"));
+            log(&format!("silent aim {why}; the hook stays in (features {keep})"));
         }
         return;
     }
@@ -1053,6 +1042,7 @@ fn stop_worker() {
 
 /// All off (unload): the jump out and the worker ended.
 pub fn shutdown() {
+    MAGIC.store(false, Ordering::SeqCst);
     NO_DROP.store(false, Ordering::SeqCst);
     switch_off("off (unload)");
     stop_worker();
@@ -1370,17 +1360,17 @@ fn worker(block: u64, mut world: entities::WorldList) {
         }
         // The feature word: nothing while the lists can't be read or a player is in the way.
         let lists_ok = !seen.is_empty() || !players.is_empty();
-        // No Bullet Drop aims at nobody, so it needs no player check.
-        let nodrop = u32::from(no_drop()) * FEAT_NODROP;
+        // Magic Bullets and No Bullet Drop aim at nobody, so they need no player check.
+        let standing = standing();
         let feat = match view {
             Some((fwd, _, eye)) if lists_ok => {
                 let pl: Vec<[f64; 3]> = players.iter().filter_map(|b| entities::pos_of(*b)).map(|p| [p[0], p[1], p[2] + CHEST_UP]).collect();
-                features(target, eye, fwd, &pl, (magic(), no_range(), instant())) | nodrop
+                features(eye, fwd, &pl, (no_range(), instant())) | standing
             }
-            _ => nodrop,
+            _ => standing,
         };
         if feat != feat_was {
-            let wanted = (u32::from(magic() && target.is_some()) * FEAT_MAGIC) | (u32::from(no_range()) * FEAT_RANGE) | (u32::from(instant()) * FEAT_INSTANT) | nodrop;
+            let wanted = (u32::from(no_range()) * FEAT_RANGE) | (u32::from(instant()) * FEAT_INSTANT) | standing;
             log(&format!("silent aim features {feat} (wanted {wanted}{})", if feat != wanted { ", held back: a player in the way or no lists" } else { "" }));
             feat_was = feat;
         }
@@ -1434,8 +1424,8 @@ fn worker(block: u64, mut world: entities::WorldList) {
         }
     }
     write_target(block, None);
-    // The worker ends with Silent Aim; No Bullet Drop keeps its bit.
-    write_feat(block, u32::from(no_drop()) * FEAT_NODROP);
+    // The worker ends with Silent Aim; Magic Bullets and No Bullet Drop keep their bits.
+    write_feat(block, standing());
 }
 
 #[cfg(test)]
@@ -1579,8 +1569,7 @@ mod tests {
         // After the steer block: the No Bullet Drop code (reads the feature word), then the call
         // to GO.
         let lea = c.windows(5).position(|w| w == [0x4C, 0x8D, 0x44, 0x24, 0x40]).unwrap();
-        let nosteer = lea + 5 + 5;
-        assert_eq!(&c[lea + 5..nosteer], &[0xC6, 0x44, 0x24, 0x58, 0x01]);
+        let nosteer = lea + 5;
         let flat = flatten_code([0; 4]);
         let call = nosteer + flat.len();
         assert_eq!(&c[nosteer..nosteer + 3], &[0x44, 0x8B, 0x15]);
@@ -1627,16 +1616,12 @@ mod tests {
         // The features: each test's jz lands on the next test, or on the frame's end.
         let end = c.windows(4).position(|w| w == [0x48, 0x83, 0xC4, FRAME]).unwrap();
         let mut k = call + 5 + 5 + 7;
-        for (bit, writes, steered_only) in feature_writes() {
+        for (bit, writes) in feature_writes() {
             assert_eq!(&c[k..k + 3], &[0x41, 0xF7, 0xC2], "test at {k}");
             assert_eq!(u32::from_le_bytes(c[k + 3..k + 7].try_into().unwrap()), bit);
             assert_eq!(c[k + 7], 0x74);
             let body = &c[k + 9..k + 9 + c[k + 8] as usize];
             let mut b = 0;
-            if steered_only {
-                assert_eq!(&body[..7], &[0x80, 0x7C, 0x24, 0x58, 0x00, 0x74, (body.len() - 7) as u8]);
-                b = 7;
-            }
             for (off, val) in writes {
                 let (op, n): (Vec<u8>, usize) = if off < 0x80 { (vec![0xC7, 0x41, off as u8], 3) } else { ([vec![0xC7, 0x81], off.to_le_bytes().to_vec()].concat(), 6) };
                 assert_eq!(&body[b..b + n], &op[..]);
@@ -1745,30 +1730,26 @@ mod tests {
         }
     }
 
-    /// Never anything for a shot that could reach a player: Magic Bullets not with a player near
-    /// the line to the target (walls would not stop it), the others not with one near the player's
-    /// crosshair; each only when its switch is on.
+    /// Never anything for a shot that could reach a player: No Range Loss and Instant Hit not with
+    /// a player near the player's crosshair; each only when its switch is on. Magic Bullets and No
+    /// Bullet Drop are not the worker's (`standing`), so they never show here.
     #[test]
     fn features_hold_back_for_players() {
-        let t = [0.0, 100.0, 1.6];
-        let all = (true, true, true);
-        assert_eq!(features(Some(t), EYE, FWD, &[], all), FEAT_MAGIC | FEAT_RANGE | FEAT_INSTANT);
-        assert_eq!(features(None, EYE, FWD, &[], all), FEAT_RANGE | FEAT_INSTANT);
-        assert_eq!(features(Some(t), EYE, FWD, &[], (false, false, false)), 0);
-        assert_eq!(features(Some(t), EYE, FWD, &[], (true, false, false)), FEAT_MAGIC);
-        // A co-op partner behind the wall, on the line to the soldier: nothing at all.
-        assert_eq!(features(Some(t), EYE, FWD, &[[0.5, 50.0, 1.6]], all), 0);
-        // Friend beside the line but near the crosshair (8 deg): Magic yes, the others no.
+        let all = (true, true);
+        assert_eq!(features(EYE, FWD, &[], all), FEAT_RANGE | FEAT_INSTANT);
+        assert_eq!(features(EYE, FWD, &[], (false, false)), 0);
+        assert_eq!(features(EYE, FWD, &[], (true, false)), FEAT_RANGE);
+        assert_eq!(features(EYE, FWD, &[], (false, true)), FEAT_INSTANT);
+        // A co-op partner near the crosshair (8 deg): nothing.
         let beside = [50.0 * 8f64.to_radians().tan(), 50.0, 1.6];
-        assert!(!player_near_line(EYE, t, &[beside], PLAYER_LINE_UNITS));
-        assert_eq!(features(Some(t), EYE, FWD, &[beside], all), FEAT_MAGIC);
-        // Friend far off to the side (40 deg) and away from the line: everything.
-        let side = [40.0, 50.0, 1.6];
-        assert_eq!(features(Some(t), EYE, FWD, &[side], all), FEAT_MAGIC | FEAT_RANGE | FEAT_INSTANT);
-        // Behind the target or behind the player: not on the line.
-        assert!(!player_near_line(EYE, t, &[[0.0, 120.0, 1.6], [0.0, -20.0, 1.6]], PLAYER_LINE_UNITS));
+        assert_eq!(features(EYE, FWD, &[beside], all), 0);
+        // Friend far off to the side (40 deg): everything.
+        assert_eq!(features(EYE, FWD, &[[40.0, 50.0, 1.6]], all), FEAT_RANGE | FEAT_INSTANT);
         // A position that is not a number counts as in the way.
-        assert!(player_near_line(EYE, t, &[[f64::NAN, 1.0, 1.0]], PLAYER_LINE_UNITS));
+        assert_eq!(features(EYE, FWD, &[[f64::NAN, 1.0, 1.0]], all), 0);
+        // The standing bits: Magic Bullets 1, No Bullet Drop 8, both off at inject.
+        assert_eq!((FEAT_MAGIC, FEAT_NODROP), (1, 8));
+        assert_eq!(standing(), 0);
     }
 
     /// Priority: crosshair, nearest, farthest; the circle and the range still limit all three.

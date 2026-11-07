@@ -111,6 +111,7 @@ Format: `Row name` [kind] `(Id)`, then `-> Page::X` for sub-pages. Page titles c
     - No Recoil [toggle] `(NoRecoil)`
     - No Spread [toggle] `(Accuracy)`
     - No Bullet Drop [toggle, off at inject] `(SilentNoDrop)`, command `nobulletdrop`. Help: "Your shots fly straight, with no drop over distance. / All your shots, Silent Aim on or off." Lives in `silentaim.rs`: it puts the shot-build jump in by itself when Silent Aim is off, and needs the world (like Silent Aim), so a profile waits for it.
+    - Magic Bullets [toggle, off at inject] `(SilentMagic)`, command `magicbullets`. Help: "Your shots go through anything in the way / and hit whatever is in your crosshair, whoever it is." Also in `silentaim.rs`, on the same hook as No Bullet Drop; needs the world. Was in Aurora > Experiments > Silent Aim (`MOVED_EXACT`).
     - No Scoped Sway [toggle] `(NoSway)`
     - Infinite Mag [toggle] `(Ammo)`
     - Infinite Reserve [toggle] `(Reserve)`
@@ -232,7 +233,6 @@ Format: `Row name` [kind] `(Id)`, then `-> Page::X` for sub-pages. Page titles c
       - Silent Aim Range [number, "300 m", 10-1000 m as the HUD counts, steps of 10, default 300] `(SilentRange)`, command `silentaimrange`.
       - Show FOV Circle [toggle, on at inject] `(SilentCircle)`, command `silentaimcircle`. The circle shows while Silent Aim is on, ESP on or off.
       - Priority [choice: Crosshair (default), Nearest, Farthest] `(SilentPriority)`, command `silentaimpriority <word>`. Which target inside the circle and range goes first.
-      - Magic Bullets [toggle, off at inject] `(SilentMagic)`, command `magicbullets`. Help: "Steered shots go through walls to the target. / Not when a player is near the line. Needs Silent Aim on."
       - No Range Loss [toggle, off at inject] `(SilentNoRange)`, command `norangeloss`. Help: "Your shots keep their damage at any distance. / Not while a player is near your crosshair. Needs Silent Aim on."
       - Instant Hit [toggle, off at inject] `(SilentInstant)`, command `instanthit`. Help: "Your shots arrive at once. / Not while a player is near your crosshair. Needs Silent Aim on."
     - Ignore only me (untested) [toggle, off] `(UnseenInbox)`, command `ignoreonlyme`.
