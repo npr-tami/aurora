@@ -1,0 +1,21 @@
+# Build output
+/target
+/dist
+*.pdb
+
+# Logs and local test files
+*.log
+
+# Signing key: the private half lives in %USERPROFILE%\.aurora-signing and must never be committed
+*.key
+.aurora-signing/
+
+# Backups and archives made while swapping DLLs or packing builds
+*.bak
+*.7z
+*.zip
+
+# Editor and IDE folders
+.vs/
+.vscode/
+.idea/

@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+# Launchpad/ is the Launchpad (.exe), dll/ is the mod (aurora.dll), shared/ is code both use.
+# Research/ holds read-only research tools; they are never part of a release.
+members = [
+    "launchpad",
+    "dll",
+    "shared/aurora-core",
+    "research/grbresearch",
+    "research/grbresearch-dll",
+    "research/grbstatic",
+]
+
+[workspace.package]
+version = "26.11.1"
+edition = "2024"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Grbstatic: x64 decoding/formatting and the exe's SHA-256.
+iced-x86 = { version = "1.22", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+sha2 = "0.10"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Environment",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Unwind, not abort: the mod's drawing and character scan catch their own panics so the game keeps
+# running (vkdraw's catch_unwind); with abort any panic there closed the game.
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# The code searches at inject (aurora-core's pattern matching) took ~15 s unoptimized.
+[profile.dev.package.aurora-core]
+opt-level = 2

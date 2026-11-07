@@ -1,0 +1,19 @@
+[package]
+name = "aurora-launchpad"
+version.workspace = true
+edition.workspace = true
+description = "Aurora.Launchpad: starts the game (Steam or Ubisoft Connect) and injects the mod. Nothing else."
+
+[[bin]]
+name = "aurora-launchpad"
+path = "src/main.rs"
+
+[dependencies]
+aurora-core = { path = "../shared/aurora-core" }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
+egui = { version = "0.36.2", default-features = false, features = ["default_fonts"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The signature check on Bin's DLL: Windows' CNG, and SHA-256.
+sha2 = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_Graphics_Gdi"] }

@@ -1,0 +1,13 @@
+[package]
+name = "aurora-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared pieces: pipe protocol, pattern parser, key bindings, menu drawing."
+
+[dependencies]
+ab_glyph = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+png = "0.18"

@@ -1,0 +1,16 @@
+[package]
+name = "grbresearch-dll"
+version.workspace = true
+edition.workspace = true
+description = "Research-only recorders inside the game (who writes, who runs this code). Never part of the mod; injected only when asked."
+
+[lib]
+name = "grbresearch_dll"
+crate-type = ["cdylib"]
+
+[dependencies]
+aurora-core = { path = "../../shared/aurora-core" }
+# The x86 decoder the mod's retour already uses: checks the bytes a regs spot moves.
+libudis86-sys = "0.2"
+serde_json = { workspace = true }
+windows-sys = { workspace = true }

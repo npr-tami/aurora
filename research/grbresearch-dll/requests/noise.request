@@ -1,0 +1,16 @@
+# Noise recording (4 Nov 2026): what each enemy perceives, and every noise event.
+# Read-only: two spots record and carry on; nothing in the game is changed.
+# Map: research\docs\perception-2026-11-04.md (Vulkan rvas; patterns found in both exes).
+secs 300
+ring 16384
+# The enemy inbox (exe+0x29cb140), at its start: rcx = enemy, rdx = record.
+# Reads: caller (return address), source handle, stimulus type, then three stack words that
+# name the sender behind a wrapper (stack reads only, always safe): rsp+c0 = the caller of
+# the generic helper sub_2a0aca0, rsp+f0 = the caller of the sight wrapper sub_29c7d60 (when
+# that called the helper), rsp+100 = the caller of the broadcast sub_240ea50.
+# The jump covers two instructions; the recorder puts it in only while no game thread sits
+# between them. Every caller passes a real record (checked offline, 4 Nov 2026).
+spot inbox; 48 83 EC 28 F6 81 C0 02 00 00 10 4C 8B CA 4C 8B D1; 0; 11; rsp+0 rdx+0 rdx+8:4 rsp+c0 rsp+f0 rsp+100
+# The noise event (exe+0x22411d0), at its start: rcx -> source handle, rdx -> second handle.
+# Reads: caller, source handle, second handle, loudness, extra, radius, type.
+spot noise; 48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 83 EC 20 48 8B F9 49; 0; 5; rsp+0 rcx+0 rdx+0 rsp+28:f rsp+30:4 rsp+38:f rsp+40:4

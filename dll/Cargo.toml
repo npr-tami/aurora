@@ -1,0 +1,17 @@
+[package]
+name = "aurora-dll"
+version.workspace = true
+edition.workspace = true
+description = "The Aurora mod, inside the game: the menu, ESP, god mode, fly, teleport, weapons, and the pipe server."
+
+[lib]
+name = "aurora"
+crate-type = ["cdylib"]
+
+[dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded", "debug"] }
+aurora-core = { path = "../shared/aurora-core" }
+retour = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows-sys = { workspace = true }
