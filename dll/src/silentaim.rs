@@ -838,6 +838,7 @@ fn feature_writes() -> [FeatureWrite; 3] {
 /// What `flatten_code` does to the local points, in plain numbers (its unit test checks the
 /// bytes against this): each point's height after the first becomes the first's plus the distance
 /// along from the first times the aim's rise over run. `dir` is the direction (x, y, z up).
+#[cfg(test)]
 pub fn flattened(points: &[[f32; 3]], dir: [f32; 3]) -> Vec<[f32; 3]> {
     let mut out = points.to_vec();
     let run = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
