@@ -497,6 +497,16 @@ All nine weapon patches share one 0x400-byte block (weapon.rs:58-70):
 - **Meaning:** the player's shot is built with the direction to the target; the game's direction word is never written. After the build the cave writes f32 values into the player's shot, only for the features that are on: Magic Bullets `+0x378` = 1.0e6 (all the player's shots), No Range Loss `+0x158` = 10000, Instant Hit `+0xC` = 100000 and `+0x8` = 100000 / 3. No Bullet Drop writes before the call instead (above): the local points at `+0x160` (count `+0x16a`) are built by the game before this function as (horizontal distance, height, side), the height holding the aim's pitch and the gravity curve (`0x3658be0`, g/2 = 4.905); this function turns them by the yaw into the world points at `+0x16c`, and the mover `0x36b1c30` only follows those, so heights on the pitch line are a straight flight. The worker writes the target, the on word and the feature word every 25 ms (on 0 with no target); with Silent Aim off and No Bullet Drop on there is no worker and the feature word holds bit 8 alone.
 - **Undo:** on = 0, then the word swapped back. The jump stays in while any of Silent Aim, Magic Bullets or No Bullet Drop is on. Unload does it before the weapon hooks (server.rs). The block is never freed.
 
+### 3.22 Magic Bullets: contact verdict call (Experimental)
+
+- **Where:** in the shot's contact walk (`0x36907e0` in build 25349072), the `call` to the per-contact function (`0x36af4b0`), at the hit of pattern "magic bullets contact verdict" `F3 0F 11 8D F8 00 00 00 E8 ?? ?? ?? ?? 8B C8 85 C0 74 ?? 83 E9 02 0F 84 ?? ?? ?? ?? 83 E9 01 74` plus 8 (exe+0x3690a03).
+- **Original:** `E8 rel32` (the call). Only the rel32 changes.
+- **New:** `E8 rel32` to a 0x80-byte block of its own, swapped with `swap_code_u64_paused` (no thread inside the call's bytes). Out with the plain swap.
+- **Block:** code at 0x00 (0x70 bytes), 0x70 on (u32), 0x74 count of verdicts turned (u32).
+- **The mod's code:** on 0, no shooter handle, shooter not `[BODY_ROOT]` → `jmp` into the game's function (it returns to the game). Else `sub rsp, 0x28; call` the game's function; `add rsp, 0x28`; eax 3 or 4 → count up, eax = 0; `ret`.
+- **Meaning:** the function's verdict on one contact: 0 passed through (the walk records it and goes on), 1 and 2 skipped (2 = a character, hit applied inside), 3 (no owner, or a surface that can't be penetrated: the walk clears its flag byte 1 and `shot+0x518`) and 4 (a body of class `0xc8ad60`: the walk stops) end the shot, 5 the shot's ignore list. Verdicts 3 and 4 of the player's shots become 0.
+- **Undo:** on = 0, then the word swapped back (Magic Bullets off, unload). The block is never freed.
+
 ### 3.18 Hooks outside the game's exe (Confirmed)
 
 - **Vulkan:** vkQueuePresentKHR, vkAcquireNextImageKHR and vkCreateSwapchainKHR are detoured with the `retour` library. They live in the Steam overlay layer or the GPU driver, not in the exe. Retour writes their bytes and keeps a trampoline; the code does not list them. Undo: `vkdraw::shutdown` disables each detour (vkdraw.rs:341-356, 518-541).

@@ -40,6 +40,12 @@
 //! - bullet drop: the direction is straight at the point, with no lead for drop or a moving target;
 //! - walls are not checked by the steering: a target behind cover takes the player's shot into
 //!   the cover, unless Magic Bullets is on.
+//!
+//! Magic Bullets has a second, smaller hook of its own (`pass_code`): the call in the shot's
+//! contact walk to the per-contact verdict (`0x36907e0` calls `0x36af4b0` for each thing the
+//! shot's segment touched this frame). For the player's shot the cave calls the game's function
+//! and turns verdicts 3 and 4 (a wall or the ground ends the shot) into 0 (passed through); a
+//! character's verdict (2) is left alone, so the shot flies on until it meets one.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -76,8 +82,9 @@ const BLOCK: usize = 0x300;
 /// The feature word's bits. No Range Loss and Instant Hit: the worker sets them every tick while
 /// Silent Aim is on (0 when off or a player is in the way). Magic Bullets and No Bullet Drop stand
 /// on their own (`standing`), Silent Aim on or off, for all the player's shots.
-/// Magic Bullets: the shot keeps its wall budget, so it goes through whatever is in the way and
-/// hits the first character on its line, whoever that is.
+/// Magic Bullets: the shot keeps its wall budget and, with the pass hook, every wall verdict
+/// becomes a pass-through, so it goes through whatever is in the way and hits the first character
+/// on its line, whoever that is.
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
 const FEAT_INSTANT: u32 = 4;
@@ -247,9 +254,21 @@ pub fn magic() -> bool {
     MAGIC.load(Ordering::Relaxed)
 }
 
-/// Magic Bullets on or off (as `set_no_drop`).
+/// Magic Bullets on or off: the standing bit (as `set_no_drop`) and the pass hook together. On
+/// and the pass hook fails: the bit goes off again and the error is the row's.
 pub fn set_magic(on: bool) -> Result<(), String> {
-    set_standing(&MAGIC, on, "magic bullets", "Magic Bullets")
+    if on {
+        set_standing(&MAGIC, true, "magic bullets", "Magic Bullets")?;
+        if let Err(e) = pass_set(true) {
+            let _ = set_standing(&MAGIC, false, "magic bullets", "Magic Bullets");
+            return Err(e);
+        }
+        Ok(())
+    } else {
+        let pass = pass_set(false);
+        set_standing(&MAGIC, false, "magic bullets", "Magic Bullets")?;
+        pass
+    }
 }
 
 pub fn no_range() -> bool {
@@ -739,6 +758,159 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
 /// Our frame: 0x68 more, so the stack is 16-aligned at the call (entry is 8 off).
 const FRAME: u8 = 0x68;
 
+/// The pass hook's place: in the contact walk, the `call` to the per-contact verdict, found by the
+/// instruction before it and the verdict tests after it (`movss [rbp+0xf8], xmm1; call ...; mov
+/// ecx, eax; test eax, eax; je; sub ecx, 2; je ...; sub ecx, 1; je`). The call is 8 bytes into the
+/// hit.
+const PASS_SITE: &str = "F3 0F 11 8D F8 00 00 00 E8 ?? ?? ?? ?? 8B C8 85 C0 74 ?? 83 E9 02 0F 84 ?? ?? ?? ?? 83 E9 01 74";
+const PASS_CALL: u64 = 8;
+/// The pass block: code, then the "on" word and a count of verdicts turned (for the log).
+const PASS_ON_AT: u64 = 0x70;
+const PASS_COUNT_AT: u64 = 0x74;
+const PASS_BLOCK: usize = 0x80;
+/// The verdicts that end a shot on a wall or the ground, and what they become.
+const VERDICT_WALL: [u8; 2] = [3, 4];
+const VERDICT_THROUGH: u32 = 0;
+
+/// The pass cave. The game's `call` goes here instead, with the shot in rcx, the hit flags in
+/// rdx and the contact in r8, and the game's return address on the stack. Not on, or not the
+/// player's shot (the same shooter check as `cave_code`): straight on into the game's function
+/// (a jump, so it returns to the game by itself). The player's shot: the game's function is
+/// called from a frame of our own (0x28: home space, and the stack 16-aligned again), then a
+/// verdict of 3 or 4 becomes 0 and a count goes up. Uses rax and r10 only before the call.
+fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    let mut to_tail: Vec<usize> = Vec::new();
+    let jcc = |c: &mut Vec<u8>, list: &mut Vec<usize>, op: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        list.push(c.len() - 4);
+    };
+    let rel32 = |from_end: u64, to: u64| (to as i64 - from_end as i64) as i32;
+    // Mov eax, [rip+on]; test eax, eax; jz TAIL
+    c.extend_from_slice(&[0x8B, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_ON_AT).to_le_bytes());
+    c.extend_from_slice(&[0x85, 0xC0]);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Mov rax, [rcx+SHOT_SHOOTER]; test rax, rax; jz TAIL
+    c.extend_from_slice(&[0x48, 0x8B, 0x81]);
+    c.extend_from_slice(&SHOT_SHOOTER.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Cmp dword [rax+0xC], 0; jge TAIL (bit 31 clear: no entity)
+    c.extend_from_slice(&[0x83, 0x78, HANDLE_LIVE, 0x00]);
+    jcc(&mut c, &mut to_tail, 0x8D);
+    // Mov rax, [rax]; test rax, rax; jz TAIL
+    c.extend_from_slice(&[0x48, 0x8B, 0x00, 0x48, 0x85, 0xC0]);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Mov r10, body_root; cmp rax, [r10]; jne TAIL
+    c.extend_from_slice(&[0x49, 0xBA]);
+    c.extend_from_slice(&body_root.to_le_bytes());
+    c.extend_from_slice(&[0x49, 0x3B, 0x02]);
+    jcc(&mut c, &mut to_tail, 0x85);
+    // Own shot: sub rsp, 0x28; call orig; add rsp, 0x28
+    c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]);
+    c.push(0xE8);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, orig).to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]);
+    // Cmp eax, 3; je FIX; cmp eax, 4; jne RET
+    c.extend_from_slice(&[0x83, 0xF8, VERDICT_WALL[0], 0x74, 0x05]);
+    c.extend_from_slice(&[0x83, 0xF8, VERDICT_WALL[1], 0x75, 0x0C]);
+    // FIX: lock inc dword [rip+count]; mov eax, through
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_COUNT_AT).to_le_bytes());
+    c.push(0xB8);
+    c.extend_from_slice(&VERDICT_THROUGH.to_le_bytes());
+    // RET
+    c.push(0xC3);
+    // TAIL: jmp orig
+    let tail = c.len();
+    c.push(0xE9);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, orig).to_le_bytes());
+    for from in to_tail {
+        c[from..from + 4].copy_from_slice(&rel32(cave + from as u64 + 4, cave + tail as u64).to_le_bytes());
+    }
+    c
+}
+
+static PASS: Mutex<Option<Hook>> = Mutex::new(None);
+static PASS_BAD: AtomicBool = AtomicBool::new(false);
+
+/// The pass hook's code search and block, once. Called with `PASS` locked.
+fn pass_prepare() -> Result<Hook, String> {
+    let exe = memory::find_module("").ok_or("no exe")?;
+    let body_root = exe.base + globals::BODY_ROOT.rva().ok_or("the player's body's place was not found")?;
+    let hit = memory::find_code(&exe, "magic bullets contact verdict", PASS_SITE)?;
+    let at = hit + PASS_CALL;
+    let bytes = memory::read(at, 5)?;
+    if bytes[0] != 0xE8 {
+        return Err("the contact verdict call is not as expected".into());
+    }
+    let orig = (at + 5).wrapping_add_signed(i64::from(i32::from_le_bytes(bytes[1..5].try_into().unwrap())));
+    let word = at & !7;
+    if at + 5 > word + 8 {
+        return Err("the contact verdict call crosses a code word".into());
+    }
+    let block = memory::alloc_code_near(exe.base, PASS_BLOCK).ok_or("no room for the magic bullets code")?;
+    memory::write(block + PASS_ON_AT, &[0u8; 8])?;
+    memory::write(block, &pass_code(block, orig, body_root))?;
+    let old_bytes = memory::read(word, 8)?;
+    let old = u64::from_le_bytes(old_bytes.clone().try_into().unwrap());
+    let mut new_bytes = old_bytes;
+    let i = (at - word) as usize;
+    new_bytes[i + 1..i + 5].copy_from_slice(&rel(at + 5, block)?);
+    log(&format!("magic bullets ready: contact verdict call exe+{:#x} to exe+{:#x}, code at {block:#x}", at - exe.base, orig - exe.base));
+    Ok(Hook { block, word, old, new: u64::from_le_bytes(new_bytes.try_into().unwrap()), at, on: false })
+}
+
+/// The pass hook in or out (with Magic Bullets). In: the "on" word is set after the call is
+/// redirected; out: the word is cleared first, and the count of verdicts turned is logged.
+fn pass_set(on: bool) -> Result<(), String> {
+    let mut slot = PASS.lock().map_err(|_| "magic bullets lock")?;
+    if on {
+        if PASS_BAD.load(Ordering::Relaxed) {
+            return Err("Magic Bullets is off for this session (see the log)".into());
+        }
+        if slot.is_none() {
+            match pass_prepare() {
+                Ok(h) => *slot = Some(h),
+                Err(e) => {
+                    log(&format!("magic bullets: {e}"));
+                    PASS_BAD.store(true, Ordering::SeqCst);
+                    return Err("Magic Bullets could not start (see the log)".into());
+                }
+            }
+        }
+        let h = slot.as_mut().ok_or("magic bullets lock")?;
+        if !h.on {
+            let was = memory::swap_code_u64_paused(h.word, h.new, h.at + 1..h.at + 5)?;
+            if was != h.old {
+                let _ = memory::swap_code_u64(h.word, was);
+                PASS_BAD.store(true, Ordering::SeqCst);
+                return Err(format!("magic bullets code word was {was:#x}, expected {:#x}; left alone", h.old));
+            }
+            h.on = true;
+        }
+        memory::write(h.block + PASS_ON_AT, &1u32.to_le_bytes())?;
+        log("magic bullets: pass hook in");
+    } else {
+        let Some(h) = slot.as_mut() else { return Ok(()) };
+        memory::write(h.block + PASS_ON_AT, &0u32.to_le_bytes())?;
+        if h.on {
+            let was = memory::swap_code_u64(h.word, h.old)?;
+            if was != h.new {
+                let _ = memory::swap_code_u64(h.word, was);
+                PASS_BAD.store(true, Ordering::SeqCst);
+                return Err(format!("magic bullets code word was {was:#x}, expected {:#x}; left alone", h.new));
+            }
+            h.on = false;
+        }
+        let n = read_u32(h.block + PASS_COUNT_AT).unwrap_or(0);
+        memory::write(h.block + PASS_COUNT_AT, &0u32.to_le_bytes())?;
+        log(&format!("magic bullets: pass hook out, {n} wall verdicts turned into pass-throughs"));
+    }
+    Ok(())
+}
+
 /// No Bullet Drop, in the cave before the game's call: when the feature word has its bit, every
 /// local path point's height becomes the first point's plus its distance along times the aim's
 /// rise over run (`dz / sqrt(dx² + dy²)` of the direction at `r8`: ours when steered, else the
@@ -1042,6 +1214,9 @@ fn stop_worker() {
 
 /// All off (unload): the jump out and the worker ended.
 pub fn shutdown() {
+    if let Err(e) = pass_set(false) {
+        log(&format!("magic bullets: {e}"));
+    }
     MAGIC.store(false, Ordering::SeqCst);
     NO_DROP.store(false, Ordering::SeqCst);
     switch_off("off (unload)");
@@ -1750,6 +1925,50 @@ mod tests {
         // The standing bits: Magic Bullets 1, No Bullet Drop 8, both off at inject.
         assert_eq!((FEAT_MAGIC, FEAT_NODROP), (1, 8));
         assert_eq!(standing(), 0);
+    }
+
+    /// The pass cave: five near jumps to TAIL (the jump into the game's function), the shooter
+    /// check through the root, the call from a 0x28 frame, verdicts 3 and 4 to 0 with the count,
+    /// everything else returned as it came.
+    #[test]
+    fn pass_code_jumps_and_verdicts() {
+        let (cave, orig, root) = (0x7ff6_1000_0000u64, 0x7ff6_136a_f4b0u64, 0x7ff6_0a00_0000u64);
+        let c = pass_code(cave, orig, root);
+        assert!(c.len() as u64 <= PASS_ON_AT, "{} bytes", c.len());
+        let rel_at = |k: usize| (cave + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
+        // The on word.
+        assert_eq!(&c[..2], &[0x8B, 0x05]);
+        assert_eq!(rel_at(2), cave + PASS_ON_AT);
+        // TAIL is the last five bytes: jmp orig.
+        let tail = c.len() - 5;
+        assert_eq!(c[tail], 0xE9);
+        assert_eq!(rel_at(tail + 1), orig);
+        let mut jumps = 0;
+        for i in 0..tail {
+            if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x8D) && i + 6 <= tail {
+                assert_eq!(rel_at(i + 2), cave + tail as u64, "jump at {i}");
+                jumps += 1;
+            }
+        }
+        assert_eq!(jumps, 5);
+        // The root, the frame and the call.
+        let k = c.windows(2).position(|w| w == [0x49, 0xBA]).unwrap() + 2;
+        assert_eq!(u64::from_le_bytes(c[k..k + 8].try_into().unwrap()), root);
+        let sub = c.windows(4).position(|w| w == [0x48, 0x83, 0xEC, 0x28]).unwrap();
+        assert_eq!(c[sub + 4], 0xE8);
+        assert_eq!(rel_at(sub + 5), orig);
+        assert_eq!(&c[sub + 9..sub + 13], &[0x48, 0x83, 0xC4, 0x28]);
+        // Cmp eax, 3; je FIX; cmp eax, 4; jne RET; FIX: lock inc [count]; mov eax, 0; RET: ret
+        let t = sub + 13;
+        assert_eq!(&c[t..t + 10], &[0x83, 0xF8, 3, 0x74, 0x05, 0x83, 0xF8, 4, 0x75, 0x0C]);
+        let fix = t + 10;
+        assert_eq!(&c[fix..fix + 3], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(fix + 3), cave + PASS_COUNT_AT);
+        assert_eq!(&c[fix + 7..fix + 12], &[0xB8, 0, 0, 0, 0]);
+        assert_eq!(c[fix + 12], 0xC3);
+        assert_eq!(t + 10 + 0x0C, fix + 12, "jne lands on ret");
+        assert_eq!(fix + 13, tail);
+        assert!(PASS_COUNT_AT + 4 <= PASS_BLOCK as u64);
     }
 
     /// Priority: crosshair, nearest, farthest; the circle and the range still limit all three.
