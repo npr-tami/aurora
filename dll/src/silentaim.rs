@@ -55,29 +55,30 @@ const SHOT_SHOOTER: u32 = 0x90;
 /// In a handle: the word whose bit 31 says its entity is there.
 const HANDLE_LIVE: u8 = 0x0C;
 
-/// Our block: the code, then the target (x y z 0, f32), the mask that clears w, the "on" word and
-/// the least squared distance from the origin to the target. 16-aligned where SSE reads. After them
+/// Our block: the code (under 0x280 bytes), then the target (x y z 0, f32), the mask that clears w,
+/// the "on" word and the least squared distance from the origin to the target. 16-aligned where SSE reads. After them
 /// what the cave saw of the last shot it steered: the shot, its origin, the game's direction, ours,
 /// and a count of steered shots (for the log and the drop measure).
-const TARGET_AT: u64 = 0x200;
-const MASK_AT: u64 = 0x210;
-const ON_AT: u64 = 0x220;
-const MIN_AT: u64 = 0x224;
-const SHOT_AT: u64 = 0x228;
-const ORIGIN_AT: u64 = 0x230;
-const OLD_AT: u64 = 0x240;
-const NEW_AT: u64 = 0x250;
+const TARGET_AT: u64 = 0x280;
+const MASK_AT: u64 = 0x290;
+const ON_AT: u64 = 0x2A0;
+const MIN_AT: u64 = 0x2A4;
+const SHOT_AT: u64 = 0x2A8;
+const ORIGIN_AT: u64 = 0x2B0;
+const OLD_AT: u64 = 0x2C0;
+const NEW_AT: u64 = 0x2D0;
 /// Steered shots, the feature word (`FEAT_*`), all the player's shots.
-const COUNT_AT: u64 = 0x260;
-const FEAT_AT: u64 = 0x264;
-const ALL_AT: u64 = 0x268;
-const BLOCK: usize = 0x280;
+const COUNT_AT: u64 = 0x2E0;
+const FEAT_AT: u64 = 0x2E4;
+const ALL_AT: u64 = 0x2E8;
+const BLOCK: usize = 0x300;
 /// The feature word's bits (the worker sets them every tick; 0 when off or a player is in the way).
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
 const FEAT_INSTANT: u32 = 4;
-/// No Bullet Drop: before the game's call, the shot's local path points are made flat (their drop
-/// axis set to the first point's), see `flatten_code`. All the player's shots, steered or not.
+/// No Bullet Drop: before the game's call, the gravity curve is taken out of the shot's local path
+/// points (their up axis follows the aim's pitch instead), see `flatten_code`. All the player's
+/// shots, steered or not.
 const FEAT_NODROP: u32 = 8;
 /// What the features write (f32). Magic Bullets: the shot's wall budget (`+0x378`, a candidate:
 /// walls subtract from it and the sweep stops at 0 or less). No Range Loss: its range (`+0x158`,
@@ -93,13 +94,15 @@ const SHOT_TRAVELLED: u64 = 0x154;
 const SHOT_PATH: u64 = 0x160;
 const SHOT_PATH_COUNT: u64 = 0x176;
 /// The local path points (before the build turns them into the world): a pointer at `+0x160` to
-/// `float3`s (along, drop, side; 12 bytes each), their count at `+0x16a`. The game builds them
-/// before it calls the shot build, with gravity in the drop axis; the shot then only follows them
-/// (the mover adds no gravity of its own).
+/// `float3`s (horizontal distance along, height, side; 12 bytes each), their count at `+0x16a`.
+/// The game builds them before it calls the shot build, the aim's pitch and gravity both in the
+/// height; the shot build turns them by the yaw only, and the shot then only follows them (the
+/// mover adds no gravity of its own). Seen live: with the heights all made equal, shots flew level
+/// wherever the aim pointed, so the height holds the pitch.
 const SHOT_LOCAL_PATH: u32 = 0x160;
 const SHOT_LOCAL_COUNT: u32 = 0x16a;
-/// A point's drop value sits this far into it.
-const POINT_DROP: u8 = 4;
+/// A point's height sits this far into it.
+const POINT_UP: u8 = 4;
 const POINT_SIZE: u8 = 12;
 /// Magic Bullets skips a shot when a player is this close to the line from the player to the target
 /// (world units); the others skip while a player is this near the crosshair (degrees).
@@ -685,8 +688,9 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&[0x0F, 0x11, 0x44, 0x24, 0x40]); // Movups [rsp+0x40], xmm0
     c.extend_from_slice(&[0x4C, 0x8D, 0x44, 0x24, 0x40]); // Lea r8, [rsp+0x40]
     c.extend_from_slice(&[0xC6, 0x44, 0x24, 0x58, 0x01]); // Mov byte [rsp+0x58], 1
-    // NOSTEER: No Bullet Drop first (the local path points made flat, before the game turns them
-    // into the world), then call TRAMP (rcx, rdx untouched; r8 ours or the game's).
+    // NOSTEER: No Bullet Drop first (the gravity curve out of the local path points, before the game
+    // turns them into the world; the direction at r8 gives the pitch to keep), then call TRAMP (rcx,
+    // rdx untouched; r8 ours or the game's).
     let nosteer = c.len();
     // The feature word's rel32 sits 3 bytes into the flatten code, so it counts from there + 4.
     let r = rel(cave + c.len() as u64 + 7, cave + FEAT_AT)?;
@@ -748,33 +752,63 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
 const FRAME: u8 = 0x68;
 
 /// No Bullet Drop, in the cave before the game's call: when the feature word has its bit, every
-/// local path point's drop value becomes the first point's. `feat` is the rel32 to the feature
-/// word from the end of the `mov r10d, [rip+feat]`. Uses rax, r10 and xmm0 (all free here: the
-/// shot's shooter is checked, our direction is in the frame).
+/// local path point's height becomes the first point's plus its distance along times the aim's
+/// rise over run (`dz / sqrt(dx² + dy²)` of the direction at `r8`: ours when steered, else the
+/// game's). That keeps the pitch and takes out the gravity curve, which is all the game added.
+/// Nothing is done with fewer than two points, no pointer, or a direction straight up or down (no
+/// horizontal run). `feat` is the rel32 to the feature word from the end of the `mov r10d,
+/// [rip+feat]`. Uses rax, r10 and xmm0 to xmm4 (all free here: the shot's shooter is checked, our
+/// direction is in the frame, and the game's function is about to be called).
 ///
 /// ```text
 ///   mov r10d, [rip+feat]; test r10d, FEAT_NODROP; jz CALL
-///   mov rax, [rcx+0x160]; test rax, rax; jz CALL        the points
-///   movzx r10d, word [rcx+0x16a]; cmp r10d, 2; jb CALL  their count
-///   movss xmm0, [rax+4]                                 the first point's drop value
-/// LOOP: add rax, 12; movss [rax+4], xmm0; dec r10d; cmp r10d, 1; ja LOOP
+///   mov rax, [rcx+0x160]; test rax, rax; jz CALL          the points
+///   movzx r10d, word [rcx+0x16a]; cmp r10d, 2; jb CALL    their count
+///   movss xmm1, [r8]; mulss xmm1, xmm1                    dx²
+///   movss xmm2, [r8+4]; mulss xmm2, xmm2; addss xmm1, xmm2; sqrtss xmm1, xmm1   run
+///   xorps xmm3, xmm3; ucomiss xmm1, xmm3; jbe CALL        no run (or not a number)
+///   movss xmm2, [r8+8]; divss xmm2, xmm1                  k = rise / run
+///   movss xmm0, [rax+4]; movss xmm3, [rax]                the first point's height and distance
+/// LOOP: add rax, 12
+///   movss xmm4, [rax]; subss xmm4, xmm3; mulss xmm4, xmm2; addss xmm4, xmm0
+///   movss [rax+4], xmm4
+///   dec r10d; cmp r10d, 1; ja LOOP
 /// CALL:
 /// ```
 fn flatten_code(feat: [u8; 4]) -> Vec<u8> {
     let mut c: Vec<u8> = Vec::new();
     let mut loop_body: Vec<u8> = vec![0x48, 0x83, 0xC0, POINT_SIZE]; // Add rax, 12
-    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x11, 0x40, POINT_DROP]); // Movss [rax+4], xmm0
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x10, 0x20]); // Movss xmm4, [rax]
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x5C, 0xE3]); // Subss xmm4, xmm3
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x59, 0xE2]); // Mulss xmm4, xmm2
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xE0]); // Addss xmm4, xmm0
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x11, 0x60, POINT_UP]); // Movss [rax+4], xmm4
     loop_body.extend_from_slice(&[0x41, 0xFF, 0xCA]); // Dec r10d
     loop_body.extend_from_slice(&[0x41, 0x83, 0xFA, 0x01]); // Cmp r10d, 1
     let back = -(loop_body.len() as i8 + 2);
     loop_body.extend_from_slice(&[0x77, back as u8]); // Ja LOOP
-    let mut first: Vec<u8> = vec![0xF3, 0x0F, 0x10, 0x40, POINT_DROP]; // Movss xmm0, [rax+4]
-    first.extend_from_slice(&loop_body);
+    // After the run check: k, the first point, the loop.
+    let mut slope: Vec<u8> = vec![0xF3, 0x41, 0x0F, 0x10, 0x50, 0x08]; // Movss xmm2, [r8+8]
+    slope.extend_from_slice(&[0xF3, 0x0F, 0x5E, 0xD1]); // Divss xmm2, xmm1
+    slope.extend_from_slice(&[0xF3, 0x0F, 0x10, 0x40, POINT_UP]); // Movss xmm0, [rax+4]
+    slope.extend_from_slice(&[0xF3, 0x0F, 0x10, 0x18]); // Movss xmm3, [rax]
+    slope.extend_from_slice(&loop_body);
+    // After the count check: the run, its check, then the rest.
+    let mut run: Vec<u8> = vec![0xF3, 0x41, 0x0F, 0x10, 0x08]; // Movss xmm1, [r8]
+    run.extend_from_slice(&[0xF3, 0x0F, 0x59, 0xC9]); // Mulss xmm1, xmm1
+    run.extend_from_slice(&[0xF3, 0x41, 0x0F, 0x10, 0x50, 0x04]); // Movss xmm2, [r8+4]
+    run.extend_from_slice(&[0xF3, 0x0F, 0x59, 0xD2]); // Mulss xmm2, xmm2
+    run.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xCA]); // Addss xmm1, xmm2
+    run.extend_from_slice(&[0xF3, 0x0F, 0x51, 0xC9]); // Sqrtss xmm1, xmm1
+    run.extend_from_slice(&[0x0F, 0x57, 0xDB]); // Xorps xmm3, xmm3
+    run.extend_from_slice(&[0x0F, 0x2E, 0xCB]); // Ucomiss xmm1, xmm3
+    run.extend_from_slice(&[0x76, slope.len() as u8]); // Jbe CALL
+    run.extend_from_slice(&slope);
     let mut count: Vec<u8> = vec![0x44, 0x0F, 0xB7, 0x91]; // Movzx r10d, word [rcx+0x16a]
     count.extend_from_slice(&SHOT_LOCAL_COUNT.to_le_bytes());
     count.extend_from_slice(&[0x41, 0x83, 0xFA, 0x02]); // Cmp r10d, 2
-    count.extend_from_slice(&[0x72, first.len() as u8]); // Jb CALL
-    count.extend_from_slice(&first);
+    count.extend_from_slice(&[0x72, run.len() as u8]); // Jb CALL
+    count.extend_from_slice(&run);
     let mut points: Vec<u8> = vec![0x48, 0x8B, 0x81]; // Mov rax, [rcx+0x160]
     points.extend_from_slice(&SHOT_LOCAL_PATH.to_le_bytes());
     points.extend_from_slice(&[0x48, 0x85, 0xC0]); // Test rax, rax
@@ -799,6 +833,23 @@ fn feature_writes() -> [FeatureWrite; 3] {
         (FEAT_RANGE, vec![(SHOT_RANGE as u32, BIG_RANGE.to_bits())], false),
         (FEAT_INSTANT, vec![(SHOT_SPEED as u32, INSTANT_SPEED.to_bits()), (SHOT_SPEED3 as u32, (INSTANT_SPEED / 3.0).to_bits())], false),
     ]
+}
+
+/// What `flatten_code` does to the local points, in plain numbers (its unit test checks the
+/// bytes against this): each point's height after the first becomes the first's plus the distance
+/// along from the first times the aim's rise over run. `dir` is the direction (x, y, z up).
+pub fn flattened(points: &[[f32; 3]], dir: [f32; 3]) -> Vec<[f32; 3]> {
+    let mut out = points.to_vec();
+    let run = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+    if out.len() < 2 || run.is_nan() || run <= 0.0 {
+        return out;
+    }
+    let k = dir[2] / run;
+    let (x0, y0) = (out[0][0], out[0][1]);
+    for p in out.iter_mut().skip(1) {
+        p[1] = (p[0] - x0) * k + y0;
+    }
+    out
 }
 
 fn prepare() -> Result<Hook, String> {
@@ -1612,50 +1663,84 @@ mod tests {
         assert_eq!(feature_writes()[2].1, vec![(0xC, 100_000f32.to_bits()), (0x8, (100_000f32 / 3.0).to_bits())]);
     }
 
-    /// The No Bullet Drop code: its three short jumps all land on its end (the call), the loop
-    /// jumps back to its own start, and it reads and writes the fields it should.
+    /// The No Bullet Drop code: its four short jumps all land on its end (the call), the loop jumps
+    /// back to its own start, it reads and writes the fields it should, and what it computes
+    /// (`flattened`) keeps the pitch and takes out the curve.
     #[test]
     fn flatten_code_jumps_and_fields() {
         let c = flatten_code([1, 2, 3, 4]);
         assert_eq!(&c[..7], &[0x44, 0x8B, 0x15, 1, 2, 3, 4]);
         assert_eq!(&c[7..10], &[0x41, 0xF7, 0xC2]);
         assert_eq!(u32::from_le_bytes(c[10..14].try_into().unwrap()), FEAT_NODROP);
-        // Every short forward jump (jz 74, jb 72) ends at the end of the code.
+        // Every short forward jump (jz 74, jb 72, jbe 76) ends at the end of the code.
         let end = c.len();
         let mut found = 0;
         for i in 0..end - 1 {
-            if matches!(c[i], 0x74 | 0x72) && i + 2 + c[i + 1] as usize == end {
+            if matches!(c[i], 0x74 | 0x72 | 0x76) && i + 2 + c[i + 1] as usize == end {
                 found += 1;
             }
         }
-        assert_eq!(found, 3);
-        // The fields: the points pointer, the count, and the drop value in a point.
-        assert!(c.windows(7).any(|w| w == [0x48, 0x8B, 0x81, 0x60, 0x01, 0x00, 0x00]));
-        assert!(c.windows(8).any(|w| w == [0x44, 0x0F, 0xB7, 0x91, 0x6A, 0x01, 0x00, 0x00]));
-        assert!(c.windows(5).any(|w| w == [0xF3, 0x0F, 0x10, 0x40, 0x04]));
+        assert_eq!(found, 4);
+        // The fields: the points pointer, the count, the direction's x, y and z, the first
+        // point's height and distance, and the height written in the loop.
+        for op in [
+            &[0x48, 0x8B, 0x81, 0x60, 0x01, 0x00, 0x00][..],
+            &[0x44, 0x0F, 0xB7, 0x91, 0x6A, 0x01, 0x00, 0x00],
+            &[0xF3, 0x41, 0x0F, 0x10, 0x08],
+            &[0xF3, 0x41, 0x0F, 0x10, 0x50, 0x04],
+            &[0xF3, 0x41, 0x0F, 0x10, 0x50, 0x08],
+            &[0xF3, 0x0F, 0x10, 0x40, 0x04],
+            &[0xF3, 0x0F, 0x10, 0x18],
+            &[0xF3, 0x0F, 0x11, 0x60, 0x04],
+            &[0xF3, 0x0F, 0x51, 0xC9],
+            &[0xF3, 0x0F, 0x5E, 0xD1],
+        ] {
+            assert!(c.windows(op.len()).any(|w| w == op), "{op:02x?}");
+        }
         // The loop: starts at "add rax, 12", its "ja" goes back to that start.
         let start = c.windows(4).position(|w| w == [0x48, 0x83, 0xC0, 0x0C]).unwrap();
         let ja = c.len() - 2;
         assert_eq!(c[ja], 0x77);
         assert_eq!((ja as i64 + 2 + i64::from(c[ja + 1] as i8)) as usize, start);
-        assert_eq!(&c[start + 4..start + 9], &[0xF3, 0x0F, 0x11, 0x40, 0x04]);
-        // Walked as the CPU would: n points, the first's drop value copied into points 1..n.
+        // Every short jump in it reaches: the first one (over all the rest) is the longest.
+        assert!(c.len() - 14 <= 0x7F, "{}", c.len());
+        // What it computes: a TAC50-like arc at 10 deg up (25 points over 400 units) comes out
+        // on the aim line, with the heights above the first point growing as x * tan(10 deg).
+        let (v, g2) = (1100f32, 4.905f32);
+        let pitch = 10f32.to_radians();
+        let dir = [0.0, pitch.cos(), pitch.sin()];
+        let pts: Vec<[f32; 3]> = (0..25)
+            .map(|i| {
+                let x = i as f32 * (400.0 / 24.0);
+                let t = x / (v * pitch.cos());
+                [x, 2.5 + x * pitch.tan() - g2 * t * t, 0.1 * i as f32]
+            })
+            .collect();
+        let flat = flattened(&pts, dir);
+        for (p, q) in pts.iter().zip(&flat) {
+            assert_eq!(p[0], q[0]);
+            assert_eq!(p[2], q[2]);
+            assert!((q[1] - (2.5 + p[0] * pitch.tan())).abs() < 1e-3, "{p:?} -> {q:?}");
+        }
+        // The last point was 0.67 units low before (the drop at 400 units), none after.
+        assert!((pts[24][1] - flat[24][1] + 0.67).abs() < 0.02);
+        // Level aim: every height becomes the first's. Straight up: nothing changes.
+        let level = flattened(&pts, [1.0, 0.0, 0.0]);
+        assert!(level.iter().all(|p| p[1] == 2.5));
+        assert_eq!(flattened(&pts, [0.0, 0.0, 1.0]), pts);
+        assert_eq!(flattened(&pts[..1], dir), pts[..1].to_vec());
+        // Walked as the CPU would: n points, points 1..n written.
         for n in [2u16, 3, 25] {
-            let mut pts: Vec<[f32; 3]> = (0..n).map(|i| [f32::from(i) * 4.0, 7.0 - f32::from(i) * f32::from(i) * 0.1, 0.5]).collect();
-            let mut rax = 0usize;
-            let mut r10 = n;
-            let y0 = pts[0][1];
+            let (mut rax, mut r10, mut written) = (0usize, n, 0);
             loop {
                 rax += 1;
-                pts[rax][1] = y0;
+                written += 1;
                 r10 -= 1;
                 if r10 <= 1 {
                     break;
                 }
             }
-            assert!(pts.iter().all(|p| p[1] == 7.0), "{n}");
-            assert_eq!(rax, n as usize - 1);
-            assert!(pts.iter().enumerate().all(|(i, p)| p[0] == i as f32 * 4.0 && p[2] == 0.5));
+            assert_eq!((rax, written), (n as usize - 1, n as usize - 1));
         }
     }
 
