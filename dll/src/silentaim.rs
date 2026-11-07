@@ -76,6 +76,9 @@ const BLOCK: usize = 0x280;
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
 const FEAT_INSTANT: u32 = 4;
+/// No Bullet Drop: before the game's call, the shot's local path points are made flat (their drop
+/// axis set to the first point's), see `flatten_code`. All the player's shots, steered or not.
+const FEAT_NODROP: u32 = 8;
 /// What the features write (f32). Magic Bullets: the shot's wall budget (`+0x378`, a candidate:
 /// walls subtract from it and the sweep stops at 0 or less). No Range Loss: its range (`+0x158`,
 /// live 50 for the VHSD2). Instant Hit: its speed (`+0xC`, live 950) and speed / 3 (`+0x8`).
@@ -89,6 +92,15 @@ const SHOT_LIFE: u64 = 0xC8;
 const SHOT_TRAVELLED: u64 = 0x154;
 const SHOT_PATH: u64 = 0x160;
 const SHOT_PATH_COUNT: u64 = 0x176;
+/// The local path points (before the build turns them into the world): a pointer at `+0x160` to
+/// `float3`s (along, drop, side; 12 bytes each), their count at `+0x16a`. The game builds them
+/// before it calls the shot build, with gravity in the drop axis; the shot then only follows them
+/// (the mover adds no gravity of its own).
+const SHOT_LOCAL_PATH: u32 = 0x160;
+const SHOT_LOCAL_COUNT: u32 = 0x16a;
+/// A point's drop value sits this far into it.
+const POINT_DROP: u8 = 4;
+const POINT_SIZE: u8 = 12;
 /// Magic Bullets skips a shot when a player is this close to the line from the player to the target
 /// (world units); the others skip while a player is this near the crosshair (degrees).
 const PLAYER_LINE_UNITS: f64 = 2.0;
@@ -160,6 +172,12 @@ static CIRCLE_HIDDEN: AtomicBool = AtomicBool::new(false);
 static MAGIC: AtomicBool = AtomicBool::new(false);
 static NO_RANGE: AtomicBool = AtomicBool::new(false);
 static INSTANT: AtomicBool = AtomicBool::new(false);
+/// No Bullet Drop: all the player's shots fly straight, Silent Aim on or off. It needs the jump in,
+/// so it keeps the hook in while Silent Aim is off (no worker then: the feature word holds its bit
+/// alone). Off at inject.
+static NO_DROP: AtomicBool = AtomicBool::new(false);
+/// Silent Aim is on (the switch, not the jump: `ON` is the jump, which No Bullet Drop shares).
+static AIM: AtomicBool = AtomicBool::new(false);
 /// Silent Aim Priority: 0 nearest the crosshair (at inject), 1 nearest to the player, 2 farthest
 /// from the player.
 static PRIORITY: AtomicU32 = AtomicU32::new(0);
@@ -204,7 +222,7 @@ fn range_kept(v: f64) -> f64 {
 }
 
 pub fn is_on() -> bool {
-    HOOK.lock().ok().and_then(|h| h.as_ref().map(|h| h.on)).unwrap_or(false)
+    AIM.load(Ordering::SeqCst)
 }
 
 /// Silent Aim Circle: shown (while Silent Aim is on).
@@ -214,7 +232,7 @@ pub fn circle() -> bool {
 
 pub fn set_circle(on: bool) {
     CIRCLE_HIDDEN.store(!on, Ordering::Relaxed);
-    if on && ON.load(Ordering::Relaxed) {
+    if on && AIM.load(Ordering::Relaxed) {
         crate::vkdraw::want_circle();
     }
 }
@@ -244,6 +262,41 @@ pub fn instant() -> bool {
 pub fn set_instant(on: bool) {
     INSTANT.store(on, Ordering::Relaxed);
     log(&format!("instant hit {}", if on { "on" } else { "off" }));
+}
+
+pub fn no_drop() -> bool {
+    NO_DROP.load(Ordering::Relaxed)
+}
+
+/// No Bullet Drop on or off. On: the jump goes in (if Silent Aim has not put it in already) and,
+/// with no worker running, the feature word gets its bit. Off: the bit goes, and the jump too
+/// unless Silent Aim still wants it.
+pub fn set_no_drop(on: bool) -> Result<(), String> {
+    let _one = SWITCH.lock().map_err(|_| "silent aim lock")?;
+    if on {
+        if BAD.load(Ordering::Relaxed) {
+            return Err("No Bullet Drop is off for this session (see the log)".into());
+        }
+        let block = jump_in()?;
+        NO_DROP.store(true, Ordering::SeqCst);
+        if !is_on() {
+            write_feat(block, FEAT_NODROP);
+        }
+        log("no bullet drop on");
+    } else {
+        NO_DROP.store(false, Ordering::SeqCst);
+        let Ok(mut slot) = HOOK.lock() else { return Err("silent aim lock".into()) };
+        if let Some(h) = slot.as_mut()
+            && !is_on()
+        {
+            write_feat(h.block, 0);
+            if h.on && let Err(e) = swap(h, false) {
+                log(&format!("silent aim: {e}"));
+            }
+        }
+        log("no bullet drop off");
+    }
+    Ok(())
 }
 
 /// Is a player within `r` of the line from `a` to `b` (Magic Bullets would send the player's shot
@@ -291,7 +344,7 @@ pub fn features(target: Option<[f64; 3]>, eye: [f64; 3], fwd: [f64; 3], players:
 
 /// The circle to draw now: the FOV in degrees, when Silent Aim is on and its circle shown.
 pub fn circle_deg() -> Option<f64> {
-    (ON.load(Ordering::Relaxed) && circle()).then(fov)
+    (AIM.load(Ordering::Relaxed) && circle()).then(fov)
 }
 
 /// Which target wins when several are inside the circle and the range.
@@ -632,8 +685,12 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&[0x0F, 0x11, 0x44, 0x24, 0x40]); // Movups [rsp+0x40], xmm0
     c.extend_from_slice(&[0x4C, 0x8D, 0x44, 0x24, 0x40]); // Lea r8, [rsp+0x40]
     c.extend_from_slice(&[0xC6, 0x44, 0x24, 0x58, 0x01]); // Mov byte [rsp+0x58], 1
-    // NOSTEER: call TRAMP (rcx, rdx untouched; r8 ours or the game's).
+    // NOSTEER: No Bullet Drop first (the local path points made flat, before the game turns them
+    // into the world), then call TRAMP (rcx, rdx untouched; r8 ours or the game's).
     let nosteer = c.len();
+    // The feature word's rel32 sits 3 bytes into the flatten code, so it counts from there + 4.
+    let r = rel(cave + c.len() as u64 + 7, cave + FEAT_AT)?;
+    c.extend_from_slice(&flatten_code(r));
     c.push(0xE8);
     let call_at = c.len();
     c.extend_from_slice(&[0; 4]);
@@ -689,6 +746,48 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
 
 /// Our frame: 0x68 more, so the stack is 16-aligned at the call (entry is 8 off).
 const FRAME: u8 = 0x68;
+
+/// No Bullet Drop, in the cave before the game's call: when the feature word has its bit, every
+/// local path point's drop value becomes the first point's. `feat` is the rel32 to the feature
+/// word from the end of the `mov r10d, [rip+feat]`. Uses rax, r10 and xmm0 (all free here: the
+/// shot's shooter is checked, our direction is in the frame).
+///
+/// ```text
+///   mov r10d, [rip+feat]; test r10d, FEAT_NODROP; jz CALL
+///   mov rax, [rcx+0x160]; test rax, rax; jz CALL        the points
+///   movzx r10d, word [rcx+0x16a]; cmp r10d, 2; jb CALL  their count
+///   movss xmm0, [rax+4]                                 the first point's drop value
+/// LOOP: add rax, 12; movss [rax+4], xmm0; dec r10d; cmp r10d, 1; ja LOOP
+/// CALL:
+/// ```
+fn flatten_code(feat: [u8; 4]) -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    let mut loop_body: Vec<u8> = vec![0x48, 0x83, 0xC0, POINT_SIZE]; // Add rax, 12
+    loop_body.extend_from_slice(&[0xF3, 0x0F, 0x11, 0x40, POINT_DROP]); // Movss [rax+4], xmm0
+    loop_body.extend_from_slice(&[0x41, 0xFF, 0xCA]); // Dec r10d
+    loop_body.extend_from_slice(&[0x41, 0x83, 0xFA, 0x01]); // Cmp r10d, 1
+    let back = -(loop_body.len() as i8 + 2);
+    loop_body.extend_from_slice(&[0x77, back as u8]); // Ja LOOP
+    let mut first: Vec<u8> = vec![0xF3, 0x0F, 0x10, 0x40, POINT_DROP]; // Movss xmm0, [rax+4]
+    first.extend_from_slice(&loop_body);
+    let mut count: Vec<u8> = vec![0x44, 0x0F, 0xB7, 0x91]; // Movzx r10d, word [rcx+0x16a]
+    count.extend_from_slice(&SHOT_LOCAL_COUNT.to_le_bytes());
+    count.extend_from_slice(&[0x41, 0x83, 0xFA, 0x02]); // Cmp r10d, 2
+    count.extend_from_slice(&[0x72, first.len() as u8]); // Jb CALL
+    count.extend_from_slice(&first);
+    let mut points: Vec<u8> = vec![0x48, 0x8B, 0x81]; // Mov rax, [rcx+0x160]
+    points.extend_from_slice(&SHOT_LOCAL_PATH.to_le_bytes());
+    points.extend_from_slice(&[0x48, 0x85, 0xC0]); // Test rax, rax
+    points.extend_from_slice(&[0x74, count.len() as u8]); // Jz CALL
+    points.extend_from_slice(&count);
+    c.extend_from_slice(&[0x44, 0x8B, 0x15]); // Mov r10d, [rip+feat]
+    c.extend_from_slice(&feat);
+    c.extend_from_slice(&[0x41, 0xF7, 0xC2]); // Test r10d, imm32
+    c.extend_from_slice(&FEAT_NODROP.to_le_bytes());
+    c.extend_from_slice(&[0x74, points.len() as u8]); // Jz CALL
+    c.extend_from_slice(&points);
+    c
+}
 
 /// The feature word's bits, and what each writes into the player's shot after the game set it up:
 /// (bit, [(offset, f32 bits)], only on a steered shot).
@@ -824,18 +923,8 @@ fn switch_on() -> Result<(), String> {
         return Err("Silent Aim is off for this session (see the log)".into());
     }
     let world = entities::WorldList::default();
-    if HOOK.lock().map_err(|_| "silent aim lock")?.is_none() {
-        warm();
-    }
-    let mut slot = HOOK.lock().map_err(|_| "silent aim lock")?;
-    let Some(h) = slot.as_mut() else { return Err("Silent Aim could not start (see the log)".into()) };
-    write_target(h.block, None);
-    if let Err(e) = swap(h, true) {
-        log(&format!("silent aim: {e}"));
-        return Err(e);
-    }
-    let block = h.block;
-    drop(slot);
+    let block = jump_in()?;
+    AIM.store(true, Ordering::SeqCst);
     RUN.store(true, Ordering::SeqCst);
     let w = std::thread::spawn(move || worker(block, world));
     if let Ok(mut s) = WORKER.lock() {
@@ -854,13 +943,42 @@ fn switch_on() -> Result<(), String> {
     Ok(())
 }
 
-/// No target, the jump out, the worker told to stop (not waited for: the worker calls this itself).
+/// The jump in, with the block ready (the code search first if it has not run): the block's
+/// address. Called with the `SWITCH` lock held. The target is cleared first, so nothing is steered
+/// until the worker says so.
+fn jump_in() -> Result<u64, String> {
+    if HOOK.lock().map_err(|_| "silent aim lock")?.is_none() {
+        warm();
+    }
+    let mut slot = HOOK.lock().map_err(|_| "silent aim lock")?;
+    let Some(h) = slot.as_mut() else { return Err("Silent Aim could not start (see the log)".into()) };
+    if !h.on {
+        write_target(h.block, None);
+    }
+    if let Err(e) = swap(h, true) {
+        log(&format!("silent aim: {e}"));
+        return Err(e);
+    }
+    Ok(h.block)
+}
+
+/// Silent Aim off: no target, the worker told to stop (not waited for: the worker calls this
+/// itself), and the jump out, unless No Bullet Drop still needs it (then the feature word keeps
+/// that bit alone).
 fn switch_off(why: &str) {
     let Ok(_one) = SWITCH.lock() else { return };
     RUN.store(false, Ordering::SeqCst);
+    AIM.store(false, Ordering::SeqCst);
     let Ok(mut slot) = HOOK.lock() else { return };
     let Some(h) = slot.as_mut() else { return };
     write_target(h.block, None);
+    if no_drop() {
+        write_feat(h.block, FEAT_NODROP);
+        if h.on {
+            log(&format!("silent aim {why}; no bullet drop keeps the hook"));
+        }
+        return;
+    }
     write_feat(h.block, 0);
     if !h.on {
         return;
@@ -883,6 +1001,7 @@ fn stop_worker() {
 
 /// All off (unload): the jump out and the worker ended.
 pub fn shutdown() {
+    NO_DROP.store(false, Ordering::SeqCst);
     switch_off("off (unload)");
     stop_worker();
 }
@@ -1182,7 +1301,7 @@ fn worker(block: u64, mut world: entities::WorldList) {
         })();
         // Raised for drop by the median of the player's last shots (`Drop`), from the player's body
         // (the shot starts at the camera, near it).
-        let target = picked.map(|(a, me)| drop.raise(me, a.point));
+        let target = picked.map(|(a, me)| if no_drop() { a.point } else { drop.raise(me, a.point) });
         let picked = picked.map(|p| p.0);
         if let Some(a) = picked
             && a.id != last_id
@@ -1199,15 +1318,17 @@ fn worker(block: u64, mut world: entities::WorldList) {
         }
         // The feature word: nothing while the lists can't be read or a player is in the way.
         let lists_ok = !seen.is_empty() || !players.is_empty();
+        // No Bullet Drop aims at nobody, so it needs no player check.
+        let nodrop = u32::from(no_drop()) * FEAT_NODROP;
         let feat = match view {
             Some((fwd, _, eye)) if lists_ok => {
                 let pl: Vec<[f64; 3]> = players.iter().filter_map(|b| entities::pos_of(*b)).map(|p| [p[0], p[1], p[2] + CHEST_UP]).collect();
-                features(target, eye, fwd, &pl, (magic(), no_range(), instant()))
+                features(target, eye, fwd, &pl, (magic(), no_range(), instant())) | nodrop
             }
-            _ => 0,
+            _ => nodrop,
         };
         if feat != feat_was {
-            let wanted = (u32::from(magic() && target.is_some()) * FEAT_MAGIC) | (u32::from(no_range()) * FEAT_RANGE) | (u32::from(instant()) * FEAT_INSTANT);
+            let wanted = (u32::from(magic() && target.is_some()) * FEAT_MAGIC) | (u32::from(no_range()) * FEAT_RANGE) | (u32::from(instant()) * FEAT_INSTANT) | nodrop;
             log(&format!("silent aim features {feat} (wanted {wanted}{})", if feat != wanted { ", held back: a player in the way or no lists" } else { "" }));
             feat_was = feat;
         }
@@ -1261,7 +1382,8 @@ fn worker(block: u64, mut world: entities::WorldList) {
         }
     }
     write_target(block, None);
-    write_feat(block, 0);
+    // The worker ends with Silent Aim; No Bullet Drop keeps its bit.
+    write_feat(block, u32::from(no_drop()) * FEAT_NODROP);
 }
 
 #[cfg(test)]
@@ -1402,27 +1524,33 @@ mod tests {
         assert_eq!(c[go + MOVED.len()], 0xE9);
         let tail = i32::from_le_bytes(c[c.len() - 4..].try_into().unwrap());
         assert_eq!((cave + c.len() as u64).wrapping_add_signed(i64::from(tail)), at + 5);
-        // The call to GO, right after the steer block.
+        // After the steer block: the No Bullet Drop code (reads the feature word), then the call
+        // to GO.
         let lea = c.windows(5).position(|w| w == [0x4C, 0x8D, 0x44, 0x24, 0x40]).unwrap();
-        let call = lea + 5 + 5;
-        assert_eq!(&c[lea + 5..call], &[0xC6, 0x44, 0x24, 0x58, 0x01]);
+        let nosteer = lea + 5 + 5;
+        assert_eq!(&c[lea + 5..nosteer], &[0xC6, 0x44, 0x24, 0x58, 0x01]);
+        let flat = flatten_code([0; 4]);
+        let call = nosteer + flat.len();
+        assert_eq!(&c[nosteer..nosteer + 3], &[0x44, 0x8B, 0x15]);
+        assert_eq!(&c[nosteer + 7..call], &flat[7..]);
         assert_eq!(c[call], 0xE8);
         let r = i32::from_le_bytes(c[call + 1..call + 5].try_into().unwrap());
         assert_eq!((cave + call as u64 + 5).wrapping_add_signed(i64::from(r)), cave + go as u64);
-        // Near jumps: 7 to GO (before the frame), 2 to the call (no target, too near).
-        let (mut to_go, mut to_call) = (0, 0);
-        for i in 0..call {
+        // Near jumps: 7 to GO (before the frame), 2 to NOSTEER (no target, too near), which is
+        // where the No Bullet Drop code starts (so unsteered shots get it too).
+        let (mut to_go, mut to_nosteer) = (0, 0);
+        for i in 0..nosteer {
             if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x86 | 0x8D) && i + 6 <= c.len() {
                 let r = i32::from_le_bytes(c[i + 2..i + 6].try_into().unwrap());
                 let to = i as i64 + 6 + i64::from(r);
                 if to == go as i64 {
                     to_go += 1;
-                } else if to == call as i64 {
-                    to_call += 1;
+                } else if to == nosteer as i64 {
+                    to_nosteer += 1;
                 }
             }
         }
-        assert_eq!((to_go, to_call), (7, 2));
+        assert_eq!((to_go, to_nosteer), (7, 2));
         // The rip-relative reads and writes.
         let rip_at = |k: usize| (cave + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
         let rip = |op: &[u8]| rip_at(c.windows(op.len()).position(|w| w == op).unwrap() + op.len());
@@ -1435,7 +1563,10 @@ mod tests {
         assert_eq!(rip(&[0x0F, 0x11, 0x0D]), cave + ORIGIN_AT);
         assert_eq!(rip(&[0x0F, 0x11, 0x1D]), cave + OLD_AT);
         assert_eq!(rip(&[0x0F, 0x11, 0x05]), cave + NEW_AT);
-        assert_eq!(rip(&[0x44, 0x8B, 0x15]), cave + FEAT_AT);
+        // Both reads of the feature word (the No Bullet Drop code, the writes after the call).
+        let feats: Vec<usize> = c.windows(3).enumerate().filter(|(_, w)| *w == [0x44, 0x8B, 0x15]).map(|(i, _)| i + 3).collect();
+        assert_eq!(feats.len(), 2);
+        assert!(feats.iter().all(|k| rip_at(*k) == cave + FEAT_AT));
         let incs: Vec<usize> = c.windows(3).enumerate().filter(|(_, w)| *w == [0xF0, 0xFF, 0x05]).map(|(i, _)| i + 3).collect();
         assert_eq!(incs.iter().map(|k| rip_at(*k)).collect::<Vec<_>>(), [cave + ALL_AT, cave + COUNT_AT]);
         // The second "mov eax, [rip+on]" (the steer check) reads "on" too.
@@ -1479,6 +1610,53 @@ mod tests {
         assert_eq!(feature_writes()[0].1, vec![(0x378, 1.0e6f32.to_bits())]);
         assert_eq!(feature_writes()[1].1, vec![(0x158, 10_000f32.to_bits())]);
         assert_eq!(feature_writes()[2].1, vec![(0xC, 100_000f32.to_bits()), (0x8, (100_000f32 / 3.0).to_bits())]);
+    }
+
+    /// The No Bullet Drop code: its three short jumps all land on its end (the call), the loop
+    /// jumps back to its own start, and it reads and writes the fields it should.
+    #[test]
+    fn flatten_code_jumps_and_fields() {
+        let c = flatten_code([1, 2, 3, 4]);
+        assert_eq!(&c[..7], &[0x44, 0x8B, 0x15, 1, 2, 3, 4]);
+        assert_eq!(&c[7..10], &[0x41, 0xF7, 0xC2]);
+        assert_eq!(u32::from_le_bytes(c[10..14].try_into().unwrap()), FEAT_NODROP);
+        // Every short forward jump (jz 74, jb 72) ends at the end of the code.
+        let end = c.len();
+        let mut found = 0;
+        for i in 0..end - 1 {
+            if matches!(c[i], 0x74 | 0x72) && i + 2 + c[i + 1] as usize == end {
+                found += 1;
+            }
+        }
+        assert_eq!(found, 3);
+        // The fields: the points pointer, the count, and the drop value in a point.
+        assert!(c.windows(7).any(|w| w == [0x48, 0x8B, 0x81, 0x60, 0x01, 0x00, 0x00]));
+        assert!(c.windows(8).any(|w| w == [0x44, 0x0F, 0xB7, 0x91, 0x6A, 0x01, 0x00, 0x00]));
+        assert!(c.windows(5).any(|w| w == [0xF3, 0x0F, 0x10, 0x40, 0x04]));
+        // The loop: starts at "add rax, 12", its "ja" goes back to that start.
+        let start = c.windows(4).position(|w| w == [0x48, 0x83, 0xC0, 0x0C]).unwrap();
+        let ja = c.len() - 2;
+        assert_eq!(c[ja], 0x77);
+        assert_eq!((ja as i64 + 2 + i64::from(c[ja + 1] as i8)) as usize, start);
+        assert_eq!(&c[start + 4..start + 9], &[0xF3, 0x0F, 0x11, 0x40, 0x04]);
+        // Walked as the CPU would: n points, the first's drop value copied into points 1..n.
+        for n in [2u16, 3, 25] {
+            let mut pts: Vec<[f32; 3]> = (0..n).map(|i| [f32::from(i) * 4.0, 7.0 - f32::from(i) * f32::from(i) * 0.1, 0.5]).collect();
+            let mut rax = 0usize;
+            let mut r10 = n;
+            let y0 = pts[0][1];
+            loop {
+                rax += 1;
+                pts[rax][1] = y0;
+                r10 -= 1;
+                if r10 <= 1 {
+                    break;
+                }
+            }
+            assert!(pts.iter().all(|p| p[1] == 7.0), "{n}");
+            assert_eq!(rax, n as usize - 1);
+            assert!(pts.iter().enumerate().all(|(i, p)| p[0] == i as f32 * 4.0 && p[2] == 0.5));
+        }
     }
 
     /// Never anything for a shot that could reach a player: Magic Bullets not with a player near

@@ -212,10 +212,11 @@ enum Id {
     /// Silent Aim > Show FOV Circle and Priority.
     SilentCircle,
     SilentPriority,
-    /// Silent Aim > Magic Bullets, No Range Loss, Instant Hit.
+    /// Silent Aim > Magic Bullets, No Range Loss, Instant Hit, No Bullet Drop.
     SilentMagic,
     SilentNoRange,
     SilentInstant,
+    SilentNoDrop,
     GearValue,
     /// Gear Score: the player's gear level, the item in a slot (`gearscore::SLOTS`), all the player
     /// owns.
@@ -1335,6 +1336,8 @@ Not when a player is near the line. Needs Silent Aim on."),
 Not while a player is near your crosshair. Needs Silent Aim on."),
             item(Id::SilentInstant, "Instant Hit", Kind::Toggle(crate::silentaim::instant()), "Your shots arrive at once.
 Not while a player is near your crosshair. Needs Silent Aim on."),
+            item(Id::SilentNoDrop, "No Bullet Drop", Kind::Toggle(crate::silentaim::no_drop()), "Your shots fly straight, with no drop over distance.
+All your shots, Silent Aim on or off."),
         ],
         Page::Fly => {
             let k = crate::keys::get();
@@ -1984,6 +1987,10 @@ fn activate(st: &mut State, it: &Item) {
         Id::SilentMagic => crate::silentaim::set_magic(!crate::silentaim::magic()),
         Id::SilentNoRange => crate::silentaim::set_no_range(!crate::silentaim::no_range()),
         Id::SilentInstant => crate::silentaim::set_instant(!crate::silentaim::instant()),
+        Id::SilentNoDrop => {
+            let on = !crate::silentaim::no_drop();
+            switched(st, crate::silentaim::set_no_drop(on), if on { "No bullet drop on" } else { "No bullet drop off" });
+        }
         Id::Unseen => {
             let on = !crate::unseen::is_on();
             switched(st, crate::unseen::set(on), if on { "Undetected on" } else { "Undetected off" });
@@ -3864,6 +3871,7 @@ fn command(id: Id) -> Option<String> {
         Id::SilentMagic => "magicbullets",
         Id::SilentNoRange => "norangeloss",
         Id::SilentInstant => "instanthit",
+        Id::SilentNoDrop => "nobulletdrop",
         Id::GearValue => "droppeditemgearscore",
         Id::GearTotal => "totalgearscore",
         Id::GearSlot(i) => return Some(format!("{}gearscore", gearscore::SLOTS[i].to_lowercase())),
@@ -5186,6 +5194,9 @@ fn default_of(st: &mut State, id: Id) {
         Id::SilentMagic => crate::silentaim::set_magic(false),
         Id::SilentNoRange => crate::silentaim::set_no_range(false),
         Id::SilentInstant => crate::silentaim::set_instant(false),
+        Id::SilentNoDrop => {
+            let _ = crate::silentaim::set_no_drop(false);
+        }
         Id::SilentPriority => crate::silentaim::set_priority(crate::silentaim::Priority::Crosshair),
         Id::HopUp => fly::set_hop_up(true),
         Id::HopHeight => fly::set_hop_height(fly::HOP_DEFAULT_M),
@@ -5254,7 +5265,7 @@ fn default_of(st: &mut State, id: Id) {
 fn has_default(id: Id) -> bool {
     matches!(
         id,
-        Id::God | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Damage | Id::FireRate | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentFov | Id::SilentRange | Id::SilentCircle | Id::SilentPriority | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::Fly | Id::FlySpeed | Id::FlySprint | Id::HopUp | Id::HopHeight | Id::SafeFly | Id::GearValue | Id::Coord(_) | Id::EspOn | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::EspDistance | Id::EspEdge | Id::EspBones | Id::EspRange | Id::EspLines | Id::EspColour(_) | Id::MenuColour | Id::PosX | Id::PosY | Id::MoveMouse | Id::MouseSupport | Id::Experimental | Id::Layout(_) | Id::ToastPosition | Id::ToastColour | Id::BackColour | Id::NotifyX | Id::NotifyY | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::ForceRead | Id::SkipAccepted
+        Id::God | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Damage | Id::FireRate | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentFov | Id::SilentRange | Id::SilentCircle | Id::SilentPriority | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::Fly | Id::FlySpeed | Id::FlySprint | Id::HopUp | Id::HopHeight | Id::SafeFly | Id::GearValue | Id::Coord(_) | Id::EspOn | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::EspDistance | Id::EspEdge | Id::EspBones | Id::EspRange | Id::EspLines | Id::EspColour(_) | Id::MenuColour | Id::PosX | Id::PosY | Id::MoveMouse | Id::MouseSupport | Id::Experimental | Id::Layout(_) | Id::ToastPosition | Id::ToastColour | Id::BackColour | Id::NotifyX | Id::NotifyY | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::ForceRead | Id::SkipAccepted
     )
 }
 
@@ -5704,7 +5715,7 @@ fn colour_state(c: [u8; 3]) -> String {
 fn default_state(id: Id) -> Option<String> {
     let d = aurora_core::proto::EspStyle::DEFAULT;
     Some(match id {
-        Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::EspOn | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::MoveMouse | Id::MouseSupport | Id::Experimental => on_off(false),
+        Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::EspOn | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::MoveMouse | Id::MouseSupport | Id::Experimental => on_off(false),
         Id::SafeFly | Id::SilentCircle | Id::HopUp | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::ForceRead | Id::SkipAccepted => on_off(true),
         Id::EspDistance => on_off(d.labels),
         Id::EspEdge => on_off(d.edge),
@@ -6314,7 +6325,7 @@ fn unwait(id: Id) -> bool {
 /// Switches that work on the player's character or hook the game's code: not before the player is
 /// in the world and the start-up code searches are done (the launcher's writes wait for the same).
 fn needs_world(id: Id) -> bool {
-    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::Damage | Id::FireRate)
+    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentNoDrop | Id::Damage | Id::FireRate)
 }
 
 fn world_ready() -> bool {
@@ -6935,6 +6946,7 @@ mod tests {
             ("Magic Bullets", TogIs(false)),
             ("No Range Loss", TogIs(false)),
             ("Instant Hit", TogIs(false)),
+            ("No Bullet Drop", TogIs(false)),
         ]);
         rows_are(Page::Movement, &[("Fly", Sub)]);
         // Hop Up and Hop Height after Sprint, no Stand While Flying.
@@ -7467,7 +7479,7 @@ World
         let names: Vec<String> = items(Page::Weapon, prefs).into_iter().map(|i| i.row.text).collect();
         assert_eq!(names, ["No Recoil", "No Spread", "No Scoped Sway", "Infinite Mag", "Infinite Reserve", "Damage Multiplier", "Fire Rate"]);
         let names: Vec<String> = items(Page::SilentAim, prefs).into_iter().map(|i| i.row.text).collect();
-        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority", "Magic Bullets", "No Range Loss", "Instant Hit"]);
+        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority", "Magic Bullets", "No Range Loss", "Instant Hit", "No Bullet Drop"]);
         assert_eq!(command(Id::SilentAim).as_deref(), Some("silentaim"));
         assert_eq!(command(Id::SilentFov).as_deref(), Some("silentaimfov"));
         assert_eq!(command(Id::SilentRange).as_deref(), Some("silentaimrange"));
@@ -7482,8 +7494,8 @@ World
         assert_eq!(default_state(Id::SilentPriority).as_deref(), Some("Crosshair"));
         assert!([Id::SilentAim, Id::SilentFov, Id::SilentRange, Id::SilentCircle, Id::SilentPriority].into_iter().all(has_default));
         assert!(!needs_world(Id::SilentCircle) && !needs_world(Id::SilentPriority));
-        // The three shot switches: off at inject, their own commands.
-        for (id, c) in [(Id::SilentMagic, "magicbullets"), (Id::SilentNoRange, "norangeloss"), (Id::SilentInstant, "instanthit")] {
+        // The four shot switches: off at inject, their own commands.
+        for (id, c) in [(Id::SilentMagic, "magicbullets"), (Id::SilentNoRange, "norangeloss"), (Id::SilentInstant, "instanthit"), (Id::SilentNoDrop, "nobulletdrop")] {
             assert_eq!(command(id).as_deref(), Some(c));
             assert_eq!(default_state(id), Some(on_off(false)));
             assert!(has_default(id));
@@ -7504,7 +7516,7 @@ World
             assert_eq!(resolve(addr, on).map(|f| f.item.id), Some(id), "{addr}");
             assert!(resolve(addr, prefs).is_none(), "{addr} while off");
         }
-        assert!(needs_world(Id::SilentAim) && !needs_world(Id::SilentFov));
+        assert!(needs_world(Id::SilentAim) && needs_world(Id::SilentNoDrop) && !needs_world(Id::SilentFov));
         assert_eq!(command(Id::FireRate).as_deref(), Some("firerate"));
         assert_eq!(command(Id::Reserve).as_deref(), Some("infinitereserve"));
         assert_eq!(default_state(Id::Reserve), Some(on_off(false)));

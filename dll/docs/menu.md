@@ -234,6 +234,7 @@ Format: `Row name` [kind] `(Id)`, then `-> Page::X` for sub-pages. Page titles c
       - Magic Bullets [toggle, off at inject] `(SilentMagic)`, command `magicbullets`. Help: "Steered shots go through walls to the target. / Not when a player is near the line. Needs Silent Aim on."
       - No Range Loss [toggle, off at inject] `(SilentNoRange)`, command `norangeloss`. Help: "Your shots keep their damage at any distance. / Not while a player is near your crosshair. Needs Silent Aim on."
       - Instant Hit [toggle, off at inject] `(SilentInstant)`, command `instanthit`. Help: "Your shots arrive at once. / Not while a player is near your crosshair. Needs Silent Aim on."
+      - No Bullet Drop [toggle, off at inject] `(SilentNoDrop)`, command `nobulletdrop`. Help: "Your shots fly straight, with no drop over distance. / All your shots, Silent Aim on or off." Puts the shot-build jump in by itself when Silent Aim is off; needs the world (like Silent Aim).
     - Ignore only me (untested) [toggle, off] `(UnseenInbox)`, command `ignoreonlyme`.
     - "Fly Water Fixes" [header], then Wait For Calm, Snap Guard, Let Game Fall (each "(untested)") [toggles, off] `(FlyCalm, FlyGuard, FlyLetFall)`, commands `flywaitforcalm`, `flysnapguard`, `flyletgamefall` (features.md, Fly Water Fixes).
   - Saved Commands [sub-page] -> `Page::Saved`: the saved rows themselves, working in place. A saved row behind Enable Experimental Features shows `(hidden)` while the switch is off, and Enter on it says to turn the switch on.
