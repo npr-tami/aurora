@@ -284,15 +284,16 @@ pub fn instant() -> bool {
     INSTANT.load(Ordering::Relaxed)
 }
 
-/// Instant Hit on or off: the switch (the shot-build cave marks the player's bullets while it is
-/// on and no player is near the crosshair) and the mover hook with it. The hook failing leaves
+/// Instant Hit on or off: a standing bit like Magic Bullets (the shot-build cave marks every one of
+/// the player's bullets while it is on, Silent Aim on or off) and the mover hook with it. The hook failing leaves
 /// the mark alone and says so in the log.
 pub fn set_instant(on: bool) {
-    INSTANT.store(on, Ordering::Relaxed);
+    if let Err(e) = set_standing(&INSTANT, on, "instant hit", "Instant Hit") {
+        log(&format!("instant hit: {e}"));
+    }
     if let Err(e) = move_set(on) {
         log(&format!("instant hit: {e}"));
     }
-    log(&format!("instant hit {}", if on { "on" } else { "off" }));
 }
 
 pub fn no_drop() -> bool {
@@ -304,9 +305,10 @@ pub fn set_no_drop(on: bool) -> Result<(), String> {
     set_standing(&NO_DROP, on, "no bullet drop", "No Bullet Drop")
 }
 
-/// The feature bits that stand without Silent Aim's worker: Magic Bullets and No Bullet Drop.
+/// The feature bits that stand without Silent Aim's worker: Magic Bullets, No Bullet Drop and
+/// Instant Hit.
 fn standing() -> u32 {
-    (u32::from(magic()) * FEAT_MAGIC) | (u32::from(no_drop()) * FEAT_NODROP)
+    (u32::from(magic()) * FEAT_MAGIC) | (u32::from(no_drop()) * FEAT_NODROP) | (u32::from(instant()) * FEAT_INSTANT)
 }
 
 /// A switch that stands on its own (Magic Bullets, No Bullet Drop) on or off. On: the jump goes in
@@ -1697,7 +1699,7 @@ fn worker(block: u64, mut world: entities::WorldList) {
         let feat = match view {
             Some((fwd, _, eye)) if lists_ok => {
                 let pl: Vec<[f64; 3]> = players.iter().filter_map(|b| entities::pos_of(*b)).map(|p| [p[0], p[1], p[2] + CHEST_UP]).collect();
-                features(eye, fwd, &pl, (no_range(), instant())) | standing
+                features(eye, fwd, &pl, (no_range(), false)) | standing
             }
             _ => standing,
         };
