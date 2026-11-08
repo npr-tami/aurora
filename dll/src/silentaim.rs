@@ -44,8 +44,8 @@
 //! Magic Bullets has a second, smaller hook of its own (`pass_code`): the call in the shot's
 //! contact walk to the per-contact verdict (`0x36907e0` calls `0x36af4b0` for each thing the
 //! shot's segment touched this frame). For the player's shot the cave calls the game's function
-//! and turns verdicts 3 and 4 (a wall or the ground ends the shot) into 0 (passed through); a
-//! character's verdict (2) is left alone, so the shot flies on until it meets one.
+//! and turns every verdict but a character's (2) into 1 (skip this contact: no impact, no stop), so
+//! the shot flies on through everything until it meets a character.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -82,8 +82,8 @@ const BLOCK: usize = 0x300;
 /// The feature word's bits. No Range Loss and Instant Hit: the worker sets them every tick while
 /// Silent Aim is on (0 when off or a player is in the way). Magic Bullets and No Bullet Drop stand
 /// on their own (`standing`), Silent Aim on or off, for all the player's shots.
-/// Magic Bullets: the shot keeps its wall budget and, with the pass hook, every wall verdict
-/// becomes a pass-through, so it goes through whatever is in the way and hits the first character
+/// Magic Bullets: the shot keeps its wall budget and, with the pass hook, every contact that is not
+/// a character is skipped, so it goes through whatever is in the way and hits the first character
 /// on its line, whoever that is.
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
@@ -284,8 +284,14 @@ pub fn instant() -> bool {
     INSTANT.load(Ordering::Relaxed)
 }
 
+/// Instant Hit on or off: the switch (the shot-build cave marks the player's bullets while it is
+/// on and no player is near the crosshair) and the mover hook with it. The hook failing leaves
+/// the mark alone and says so in the log.
 pub fn set_instant(on: bool) {
     INSTANT.store(on, Ordering::Relaxed);
+    if let Err(e) = move_set(on) {
+        log(&format!("instant hit: {e}"));
+    }
     log(&format!("instant hit {}", if on { "on" } else { "off" }));
 }
 
@@ -765,19 +771,23 @@ const FRAME: u8 = 0x68;
 const PASS_SITE: &str = "F3 0F 11 8D F8 00 00 00 E8 ?? ?? ?? ?? 8B C8 85 C0 74 ?? 83 E9 02 0F 84 ?? ?? ?? ?? 83 E9 01 74";
 const PASS_CALL: u64 = 8;
 /// The pass block: code, then the "on" word and a count of verdicts turned (for the log).
-const PASS_ON_AT: u64 = 0x70;
-const PASS_COUNT_AT: u64 = 0x74;
-const PASS_BLOCK: usize = 0x80;
-/// The verdicts that end a shot on a wall or the ground, and what they become.
-const VERDICT_WALL: [u8; 2] = [3, 4];
-const VERDICT_THROUGH: u32 = 0;
+const PASS_ON_AT: u64 = 0x80;
+const PASS_COUNT_AT: u64 = 0x84;
+const PASS_BLOCK: usize = 0x90;
+/// The per-contact verdicts: 2 is a character (its hit is applied inside the function), 1 is
+/// "skip this contact" (nothing recorded, the walk goes on). Every other verdict (0 passed through
+/// but recorded as an impact, 3 and 4 a wall or the ground that ends the shot, 5 the ignore list)
+/// becomes 1 for the player's shots: recording a wall as the impact also ends the shot, so turning
+/// 3 and 4 into 0 was not enough (seen in game).
+const VERDICT_CHARACTER: u8 = 2;
+const VERDICT_SKIP: u32 = 1;
 
 /// The pass cave. The game's `call` goes here instead, with the shot in rcx, the hit flags in
 /// rdx and the contact in r8, and the game's return address on the stack. Not on, or not the
 /// player's shot (the same shooter check as `cave_code`): straight on into the game's function
 /// (a jump, so it returns to the game by itself). The player's shot: the game's function is
-/// called from a frame of our own (0x28: home space, and the stack 16-aligned again), then a
-/// verdict of 3 or 4 becomes 0 and a count goes up. Uses rax and r10 only before the call.
+/// called from a frame of our own (0x28: home space, and the stack 16-aligned again), then any
+/// verdict but a character's becomes 1 and a count goes up. Uses rax and r10 only before the call.
 fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
     let mut c: Vec<u8> = Vec::new();
     let mut to_tail: Vec<usize> = Vec::new();
@@ -807,19 +817,24 @@ fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
     c.extend_from_slice(&body_root.to_le_bytes());
     c.extend_from_slice(&[0x49, 0x3B, 0x02]);
     jcc(&mut c, &mut to_tail, 0x85);
+    // Cmp dword [rcx+0x378], MAGIC_ENERGY; jne TAIL: only shots the shot-build cave marked (the
+    // player's bullets). Grenades and other gadgets carry no mark, so they still stop on the ground.
+    c.extend_from_slice(&[0x81, 0xB9]);
+    c.extend_from_slice(&(SHOT_ENERGY as u32).to_le_bytes());
+    c.extend_from_slice(&MAGIC_ENERGY.to_bits().to_le_bytes());
+    jcc(&mut c, &mut to_tail, 0x85);
     // Own shot: sub rsp, 0x28; call orig; add rsp, 0x28
     c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]);
     c.push(0xE8);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, orig).to_le_bytes());
     c.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]);
-    // Cmp eax, 3; je FIX; cmp eax, 4; jne RET
-    c.extend_from_slice(&[0x83, 0xF8, VERDICT_WALL[0], 0x74, 0x05]);
-    c.extend_from_slice(&[0x83, 0xF8, VERDICT_WALL[1], 0x75, 0x0C]);
-    // FIX: lock inc dword [rip+count]; mov eax, through
+    // Cmp eax, 2; je RET (a character: as the game said)
+    c.extend_from_slice(&[0x83, 0xF8, VERDICT_CHARACTER, 0x74, 0x0C]);
+    // FIX: lock inc dword [rip+count]; mov eax, skip
     c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_COUNT_AT).to_le_bytes());
     c.push(0xB8);
-    c.extend_from_slice(&VERDICT_THROUGH.to_le_bytes());
+    c.extend_from_slice(&VERDICT_SKIP.to_le_bytes());
     // RET
     c.push(0xC3);
     // TAIL: jmp orig
@@ -906,7 +921,145 @@ fn pass_set(on: bool) -> Result<(), String> {
         }
         let n = read_u32(h.block + PASS_COUNT_AT).unwrap_or(0);
         memory::write(h.block + PASS_COUNT_AT, &0u32.to_le_bytes())?;
-        log(&format!("magic bullets: pass hook out, {n} wall verdicts turned into pass-throughs"));
+        log(&format!("magic bullets: pass hook out, {n} contacts skipped"));
+    }
+    Ok(())
+}
+
+/// Instant Hit's mover hook: the per-frame shot function's `call` to the mover (`0x36b1c30`, shot
+/// in rcx, the frame time in xmm1). The mover moves a shot by `+0x10` times the frame time along
+/// its world points, and drops what is left over at each point unless the byte at `+0x374` is
+/// set, so a shot covers about one point per frame whatever its speed. Found by the bytes around
+/// the call; the call is `MOVE_CALL` bytes into the hit.
+const MOVE_SITE: &str = "74 0B 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 85 C0 48 8B CF 0F 95 C0 88 47 22";
+const MOVE_CALL: u64 = 19;
+/// The move block: code, then the "on" word and a count of shots sped up (for the log).
+const MOVE_ON_AT: u64 = 0x40;
+const MOVE_COUNT_AT: u64 = 0x44;
+const MOVE_BLOCK: usize = 0x50;
+/// The mover's speed and carry-over flag.
+const SHOT_MOVE_SPEED: u32 = 0x10;
+const SHOT_CARRY: u32 = 0x374;
+/// What the mover hook puts into a marked shot every frame: far more than any path is long in one
+/// frame, so the whole path is walked (and swept) in the frame the shot first moves.
+const INSTANT_MOVE: f32 = 1.0e8;
+
+/// The move cave. The game's `call` goes here instead (shot in rcx, frame time in xmm1, the
+/// game's return address on the stack); it always jumps on into the mover, so it returns to the
+/// game by itself. On and the shot carries Instant Hit's mark (`+0xC` = `INSTANT_SPEED`, written
+/// by the shot-build cave into the player's bullets only): the mover speed becomes `INSTANT_MOVE`,
+/// the carry-over flag 1 and a count goes up. Uses rax only.
+///
+/// ```text
+///   mov eax, [rip+on]; test eax, eax; jz TAIL
+///   cmp dword [rcx+0xC], INSTANT_SPEED; jne TAIL
+///   mov dword [rcx+0x10], INSTANT_MOVE
+///   mov byte [rcx+0x374], 1
+///   lock inc dword [rip+count]
+/// TAIL: jmp orig
+/// ```
+fn move_code(cave: u64, orig: u64) -> Vec<u8> {
+    let mut c: Vec<u8> = Vec::new();
+    let rel32 = |from_end: u64, to: u64| (to as i64 - from_end as i64) as i32;
+    c.extend_from_slice(&[0x8B, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_ON_AT).to_le_bytes());
+    c.extend_from_slice(&[0x85, 0xC0]);
+    let mut to_tail: Vec<usize> = Vec::new();
+    c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);
+    to_tail.push(c.len() - 4);
+    c.extend_from_slice(&[0x81, 0x79, SHOT_SPEED as u8]);
+    c.extend_from_slice(&INSTANT_SPEED.to_bits().to_le_bytes());
+    c.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);
+    to_tail.push(c.len() - 4);
+    c.extend_from_slice(&[0xC7, 0x41, SHOT_MOVE_SPEED as u8]);
+    c.extend_from_slice(&INSTANT_MOVE.to_bits().to_le_bytes());
+    c.extend_from_slice(&[0xC6, 0x81]);
+    c.extend_from_slice(&SHOT_CARRY.to_le_bytes());
+    c.push(1);
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_COUNT_AT).to_le_bytes());
+    let tail = c.len();
+    c.push(0xE9);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, orig).to_le_bytes());
+    for from in to_tail {
+        c[from..from + 4].copy_from_slice(&rel32(cave + from as u64 + 4, cave + tail as u64).to_le_bytes());
+    }
+    c
+}
+
+static MOVE: Mutex<Option<Hook>> = Mutex::new(None);
+static MOVE_BAD: AtomicBool = AtomicBool::new(false);
+
+/// The move hook's code search and block, once. Called with `MOVE` locked.
+fn move_prepare() -> Result<Hook, String> {
+    let exe = memory::find_module("").ok_or("no exe")?;
+    let hit = memory::find_code(&exe, "instant hit mover call", MOVE_SITE)?;
+    let at = hit + MOVE_CALL;
+    let bytes = memory::read(at, 5)?;
+    if bytes[0] != 0xE8 {
+        return Err("the mover call is not as expected".into());
+    }
+    let orig = (at + 5).wrapping_add_signed(i64::from(i32::from_le_bytes(bytes[1..5].try_into().unwrap())));
+    let word = at & !7;
+    if at + 5 > word + 8 {
+        return Err("the mover call crosses a code word".into());
+    }
+    let block = memory::alloc_code_near(exe.base, MOVE_BLOCK).ok_or("no room for the instant hit code")?;
+    memory::write(block + MOVE_ON_AT, &[0u8; 8])?;
+    memory::write(block, &move_code(block, orig))?;
+    let old_bytes = memory::read(word, 8)?;
+    let old = u64::from_le_bytes(old_bytes.clone().try_into().unwrap());
+    let mut new_bytes = old_bytes;
+    let i = (at - word) as usize;
+    new_bytes[i + 1..i + 5].copy_from_slice(&rel(at + 5, block)?);
+    log(&format!("instant hit ready: mover call exe+{:#x} to exe+{:#x}, code at {block:#x}", at - exe.base, orig - exe.base));
+    Ok(Hook { block, word, old, new: u64::from_le_bytes(new_bytes.try_into().unwrap()), at, on: false })
+}
+
+/// The move hook in or out (with Instant Hit), as `pass_set`.
+fn move_set(on: bool) -> Result<(), String> {
+    let mut slot = MOVE.lock().map_err(|_| "instant hit lock")?;
+    if on {
+        if MOVE_BAD.load(Ordering::Relaxed) {
+            return Err("Instant Hit is off for this session (see the log)".into());
+        }
+        if slot.is_none() {
+            match move_prepare() {
+                Ok(h) => *slot = Some(h),
+                Err(e) => {
+                    log(&format!("instant hit: {e}"));
+                    MOVE_BAD.store(true, Ordering::SeqCst);
+                    return Err("Instant Hit could not start (see the log)".into());
+                }
+            }
+        }
+        let h = slot.as_mut().ok_or("instant hit lock")?;
+        if !h.on {
+            let was = memory::swap_code_u64_paused(h.word, h.new, h.at + 1..h.at + 5)?;
+            if was != h.old {
+                let _ = memory::swap_code_u64(h.word, was);
+                MOVE_BAD.store(true, Ordering::SeqCst);
+                return Err(format!("instant hit code word was {was:#x}, expected {:#x}; left alone", h.old));
+            }
+            h.on = true;
+        }
+        memory::write(h.block + MOVE_ON_AT, &1u32.to_le_bytes())?;
+        log("instant hit: mover hook in");
+    } else {
+        let Some(h) = slot.as_mut() else { return Ok(()) };
+        memory::write(h.block + MOVE_ON_AT, &0u32.to_le_bytes())?;
+        if h.on {
+            let was = memory::swap_code_u64(h.word, h.old)?;
+            if was != h.new {
+                let _ = memory::swap_code_u64(h.word, was);
+                MOVE_BAD.store(true, Ordering::SeqCst);
+                return Err(format!("instant hit code word was {was:#x}, expected {:#x}; left alone", h.new));
+            }
+            h.on = false;
+        }
+        let n = read_u32(h.block + MOVE_COUNT_AT).unwrap_or(0);
+        memory::write(h.block + MOVE_COUNT_AT, &0u32.to_le_bytes())?;
+        log(&format!("instant hit: mover hook out, {n} shot frames sped up"));
     }
     Ok(())
 }
@@ -1217,6 +1370,10 @@ pub fn shutdown() {
     if let Err(e) = pass_set(false) {
         log(&format!("magic bullets: {e}"));
     }
+    if let Err(e) = move_set(false) {
+        log(&format!("instant hit: {e}"));
+    }
+    INSTANT.store(false, Ordering::SeqCst);
     MAGIC.store(false, Ordering::SeqCst);
     NO_DROP.store(false, Ordering::SeqCst);
     switch_off("off (unload)");
@@ -1927,9 +2084,9 @@ mod tests {
         assert_eq!(standing(), 0);
     }
 
-    /// The pass cave: five near jumps to TAIL (the jump into the game's function), the shooter
-    /// check through the root, the call from a 0x28 frame, verdicts 3 and 4 to 0 with the count,
-    /// everything else returned as it came.
+    /// The pass cave: six near jumps to TAIL (the jump into the game's function), the shooter
+    /// check through the root, the bullet mark, the call from a 0x28 frame, a character's verdict returned as it
+    /// came, every other verdict 1 with the count.
     #[test]
     fn pass_code_jumps_and_verdicts() {
         let (cave, orig, root) = (0x7ff6_1000_0000u64, 0x7ff6_136a_f4b0u64, 0x7ff6_0a00_0000u64);
@@ -1950,7 +2107,11 @@ mod tests {
                 jumps += 1;
             }
         }
-        assert_eq!(jumps, 5);
+        assert_eq!(jumps, 6);
+        // The bullet mark: cmp dword [rcx+0x378], 1.0e6.
+        let m = c.windows(2).position(|w| w == [0x81, 0xB9]).unwrap();
+        assert_eq!(u32::from_le_bytes(c[m + 2..m + 6].try_into().unwrap()), 0x378);
+        assert_eq!(u32::from_le_bytes(c[m + 6..m + 10].try_into().unwrap()), 1.0e6f32.to_bits());
         // The root, the frame and the call.
         let k = c.windows(2).position(|w| w == [0x49, 0xBA]).unwrap() + 2;
         assert_eq!(u64::from_le_bytes(c[k..k + 8].try_into().unwrap()), root);
@@ -1958,17 +2119,45 @@ mod tests {
         assert_eq!(c[sub + 4], 0xE8);
         assert_eq!(rel_at(sub + 5), orig);
         assert_eq!(&c[sub + 9..sub + 13], &[0x48, 0x83, 0xC4, 0x28]);
-        // Cmp eax, 3; je FIX; cmp eax, 4; jne RET; FIX: lock inc [count]; mov eax, 0; RET: ret
+        // Cmp eax, 2; je RET; FIX: lock inc [count]; mov eax, 1; RET: ret
         let t = sub + 13;
-        assert_eq!(&c[t..t + 10], &[0x83, 0xF8, 3, 0x74, 0x05, 0x83, 0xF8, 4, 0x75, 0x0C]);
-        let fix = t + 10;
+        assert_eq!(&c[t..t + 5], &[0x83, 0xF8, 2, 0x74, 0x0C]);
+        let fix = t + 5;
         assert_eq!(&c[fix..fix + 3], &[0xF0, 0xFF, 0x05]);
         assert_eq!(rel_at(fix + 3), cave + PASS_COUNT_AT);
-        assert_eq!(&c[fix + 7..fix + 12], &[0xB8, 0, 0, 0, 0]);
+        assert_eq!(&c[fix + 7..fix + 12], &[0xB8, 1, 0, 0, 0]);
         assert_eq!(c[fix + 12], 0xC3);
-        assert_eq!(t + 10 + 0x0C, fix + 12, "jne lands on ret");
+        assert_eq!(t + 5 + 0x0C, fix + 12, "je lands on ret");
         assert_eq!(fix + 13, tail);
         assert!(PASS_COUNT_AT + 4 <= PASS_BLOCK as u64);
+    }
+
+    /// The move cave: the on word, Instant Hit's mark on `+0xC`, the mover speed and carry-over
+    /// flag written, the count, then the jump into the mover; both checks jump to that jump.
+    #[test]
+    fn move_code_marks_and_jumps() {
+        let (cave, orig) = (0x7ff6_1000_0000u64, 0x7ff6_136b_1c30u64);
+        let c = move_code(cave, orig);
+        assert!(c.len() as u64 <= MOVE_ON_AT, "{} bytes", c.len());
+        assert!(MOVE_COUNT_AT + 4 <= MOVE_BLOCK as u64);
+        let rel_at = |k: usize| (cave + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
+        assert_eq!(&c[..2], &[0x8B, 0x05]);
+        assert_eq!(rel_at(2), cave + MOVE_ON_AT);
+        let tail = c.len() - 5;
+        assert_eq!(c[tail], 0xE9);
+        assert_eq!(rel_at(tail + 1), orig);
+        assert_eq!(&c[6..10], &[0x85, 0xC0, 0x0F, 0x84]);
+        assert_eq!(rel_at(10), cave + tail as u64);
+        assert_eq!(&c[14..17], &[0x81, 0x79, 0x0C]);
+        assert_eq!(u32::from_le_bytes(c[17..21].try_into().unwrap()), INSTANT_SPEED.to_bits());
+        assert_eq!(&c[21..23], &[0x0F, 0x85]);
+        assert_eq!(rel_at(23), cave + tail as u64);
+        assert_eq!(&c[27..30], &[0xC7, 0x41, 0x10]);
+        assert_eq!(u32::from_le_bytes(c[30..34].try_into().unwrap()), INSTANT_MOVE.to_bits());
+        assert_eq!(&c[34..41], &[0xC6, 0x81, 0x74, 0x03, 0x00, 0x00, 0x01]);
+        assert_eq!(&c[41..44], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(44), cave + MOVE_COUNT_AT);
+        assert_eq!(tail, 48);
     }
 
     /// Priority: crosshair, nearest, farthest; the circle and the range still limit all three.

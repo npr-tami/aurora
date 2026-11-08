@@ -501,11 +501,21 @@ All nine weapon patches share one 0x400-byte block (weapon.rs:58-70):
 
 - **Where:** in the shot's contact walk (`0x36907e0` in build 25349072), the `call` to the per-contact function (`0x36af4b0`), at the hit of pattern "magic bullets contact verdict" `F3 0F 11 8D F8 00 00 00 E8 ?? ?? ?? ?? 8B C8 85 C0 74 ?? 83 E9 02 0F 84 ?? ?? ?? ?? 83 E9 01 74` plus 8 (exe+0x3690a03).
 - **Original:** `E8 rel32` (the call). Only the rel32 changes.
-- **New:** `E8 rel32` to a 0x80-byte block of its own, swapped with `swap_code_u64_paused` (no thread inside the call's bytes). Out with the plain swap.
-- **Block:** code at 0x00 (0x70 bytes), 0x70 on (u32), 0x74 count of verdicts turned (u32).
-- **The mod's code:** on 0, no shooter handle, shooter not `[BODY_ROOT]` → `jmp` into the game's function (it returns to the game). Else `sub rsp, 0x28; call` the game's function; `add rsp, 0x28`; eax 3 or 4 → count up, eax = 0; `ret`.
-- **Meaning:** the function's verdict on one contact: 0 passed through (the walk records it and goes on), 1 and 2 skipped (2 = a character, hit applied inside), 3 (no owner, or a surface that can't be penetrated: the walk clears its flag byte 1 and `shot+0x518`) and 4 (a body of class `0xc8ad60`: the walk stops) end the shot, 5 the shot's ignore list. Verdicts 3 and 4 of the player's shots become 0.
+- **New:** `E8 rel32` to a 0x90-byte block of its own, swapped with `swap_code_u64_paused` (no thread inside the call's bytes). Out with the plain swap.
+- **Block:** code at 0x00 (0x7B bytes), 0x80 on (u32), 0x84 count of contacts skipped (u32). The cave only acts on shots carrying the bullet mark (`+0x378` = 1.0e6, written by the shot-build cave), so grenades and other gadgets still stop on the ground.
+- **The mod's code:** on 0, no shooter handle, shooter not `[BODY_ROOT]` → `jmp` into the game's function (it returns to the game). Else `sub rsp, 0x28; call` the game's function; `add rsp, 0x28`; eax 2 → `ret`; else count up, eax = 1; `ret`.
+- **Meaning:** the function's verdict on one contact: 0 passed through (the walk records it and goes on), 1 and 2 skipped (2 = a character, hit applied inside), 3 (no owner, or a surface that can't be penetrated: the walk clears its flag byte 1 and `shot+0x518`) and 4 (a body of class `0xc8ad60`: the walk stops) end the shot, 5 the shot's ignore list. For the player's shots every verdict but 2 becomes 1 (skipped: nothing recorded). A 0 is not enough: the walk records a passed contact as the shot's impact (`shot+0x3a0`, `shot+0x28` = 1), which ends it.
 - **Undo:** on = 0, then the word swapped back (Magic Bullets off, unload). The block is never freed.
+
+### 3.23 Instant Hit: mover call (Experimental)
+
+- **Where:** in the per-frame shot function (`0x36a70e0` in build 25349072), the `call` to the mover (`0x36b1c30`, shot in rcx, frame time in xmm1), at the hit of pattern "instant hit mover call" `74 0B 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 85 C0 48 8B CF 0F 95 C0 88 47 22` plus 19 (exe+0x36a7238).
+- **Original:** `E8 rel32` (the call). Only the rel32 changes.
+- **New:** `E8 rel32` to a 0x50-byte block of its own, swapped with `swap_code_u64_paused`. Out with the plain swap.
+- **Block:** code at 0x00 (0x35 bytes), 0x40 on (u32), 0x44 count of shot frames sped up (u32).
+- **The mod's code:** on 0, or `[shot+0xC]` is not Instant Hit's mark (100000, written by the shot-build cave into the player's bullets) → `jmp` into the mover. Else `[shot+0x10]` = 1.0e8, byte `[shot+0x374]` = 1, count up, `jmp` into the mover.
+- **Meaning:** the mover moves a shot by `[shot+0x10]` × frame time along its world points (`+0x16c`, count `+0x176`), not by `+0xC` (it only copies `+0xC` / 3 into `+0x8`). At each point it reaches it drops the distance left over unless the byte `+0x374` is set (`cmp byte [rbx+0x374], 0` at exe+0x36b1ee4), so a shot covers about one point per frame whatever its speed. With both set the whole path is walked in the shot's first frame and the sweep covers it at once. Writing only `+0xC` (and `+0x8`) changed nothing in game (shots still flew at about 850 units/s).
+- **Undo:** on = 0, then the word swapped back (Instant Hit off, unload). The block is never freed.
 
 ### 3.18 Hooks outside the game's exe (Confirmed)
 
