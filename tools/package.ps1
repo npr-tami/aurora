@@ -13,7 +13,7 @@
 # it. The Launchpad only injects %APPDATA%\Aurora\Bin\aurora.dll, only when its stamp and build card
 # check, and never writes it.
 
-param([string]$Build = '')
+param([string]$Build = '', [switch]$OnlyDll)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -59,16 +59,21 @@ $dll = Join-Path $target 'release\aurora.dll'
 if (-not (Test-Path $dll)) { throw "no DLL at $dll" }
 & (Join-Path $PSScriptRoot 'sign-dll.ps1') -Dll $dll | Out-Null
 
-try {
-    cargo build --release -p aurora-launchpad
-    if ($LASTEXITCODE -ne 0) { throw 'Launchpad build failed' }
-} finally {
-    Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
-}
+if (-not $OnlyDll) {
+    try {
+        cargo build --release -p aurora-launchpad
+        if ($LASTEXITCODE -ne 0) { throw 'Launchpad build failed' }
+    } finally {
+        Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    }
 
-$dist = Join-Path $root 'dist'
-New-Item -ItemType Directory -Force $dist | Out-Null
-$out = Join-Path $dist "Aurora.Launchpad $version.exe"
-Copy-Item (Join-Path $target 'release\aurora-launchpad.exe') $out -Force
-$size = [math]::Round((Get-Item $out).Length / 1MB, 1)
-Write-Output "Built $out ($size MB, no DLL inside). New DLL: $dll (stamped inside); put it in Bin with tools\swap-dll.ps1 (unload first)."
+    $dist = Join-Path $root 'dist'
+    New-Item -ItemType Directory -Force $dist | Out-Null
+    $out = Join-Path $dist "Aurora.Launchpad $version.exe"
+    Copy-Item (Join-Path $target 'release\aurora-launchpad.exe') $out -Force
+    $size = [math]::Round((Get-Item $out).Length / 1MB, 1)
+    Write-Output "Built $out ($size MB, no DLL inside). New DLL: $dll (stamped inside); put it in Bin with tools\swap-dll.ps1 (unload first)."
+} else {
+    Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    Write-Output "Built DLL only: $dll (stamped inside)."
+}

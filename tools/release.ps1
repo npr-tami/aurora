@@ -63,16 +63,20 @@ $target = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath([IO.Path]::Combine
 $exe = Join-Path $root "dist\Aurora.Launchpad $version.exe"
 $dll = Join-Path $target 'release\aurora.dll'
 # Old copies out of the way, so the files checked below are this build's.
-Remove-Item $exe, $dll -ErrorAction SilentlyContinue
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'package.ps1') -Build $version
+if ($doLaunchpad) { Remove-Item $exe -ErrorAction SilentlyContinue }
+Remove-Item $dll -ErrorAction SilentlyContinue
+$packageArgs = @('-Build', $version)
+if (-not $doLaunchpad) { $packageArgs += '-OnlyDll' }
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'package.ps1') @packageArgs
 if ($LASTEXITCODE -ne 0) { Stop-Here 'the build failed.' }
 
 Step '5/7 Checking the built files'
-foreach ($f in $exe, $dll) {
+$builtFiles = if ($doLaunchpad) { @($exe, $dll) } else { @($dll) }
+foreach ($f in $builtFiles) {
     if (-not (Test-Path $f)) { Stop-Here "missing: $f" }
     Ok "$f  $([math]::Round((Get-Item $f).Length / 1MB, 1)) MB  sha256 $((Get-FileHash $f -Algorithm SHA256).Hash.ToLower())"
 }
-foreach ($f in $exe, $dll) {
+foreach ($f in $builtFiles) {
     $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($f))
     if ($env:USERNAME.Length -ge 3 -and $text.IndexOf("\$env:USERNAME\", [StringComparison]::OrdinalIgnoreCase) -ge 0) { Stop-Here "$f contains your user folder path." }
 }

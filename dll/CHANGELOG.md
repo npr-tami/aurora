@@ -1,3 +1,8 @@
+## aurora.dll 26.11.2
+08/11/2026
+- Magic Bullets skips obstacles and hits the first character in the bullet's path
+- Instant Hit stays among Experimental features
+
 ## aurora.dll 26.11.1
 07/11/2026
 - Initial release
