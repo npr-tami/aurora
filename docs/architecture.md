@@ -76,8 +76,6 @@ The file is binary: `AURORAOF`, a layout version, the build id, then per search 
 - Every read and write goes through `memory::read` / `memory::write`: they check the range is mapped, and copy through the kernel (`ReadProcessMemory` on its own process), so memory freed in between fails the call instead of crashing the game.
 - Addresses found earlier are re-checked right before each write (a world change frees everything).
 - Code patches check the bytes are what was expected before and after the swap; on a mismatch they put it back and stop.
-- Changes act on the player's own character only. Undetected is the exception: it changes how every enemy NPC perceives (their eyesight and alert meter), and its docs say so. It is game AI only: not a bypass, not anti-cheat evasion, not hiding anything (see `unseen.rs`).
-- Never touches the game's files. Never Ghost Coins.
 
 ## Files
 

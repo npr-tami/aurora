@@ -2,8 +2,6 @@
 
 A mod menu for Ghost Recon Breakpoint (PC, Vulkan and DirectX 11), plus the offsets, research tools and notes behind it.
 
-Aurora does not touch anti-cheat, network or account code, and it does not hide itself.
-
 ## Features
 
 - In-game menu drawn into the game's own frames, with hotkeys, profiles and a command box

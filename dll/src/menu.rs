@@ -182,8 +182,7 @@ enum Id {
     /// while Fly is on (`fly::follow_fly`).
     HopUp,
     HopHeight,
-    /// Self > Undetected: enemy NPCs' eyesight and alert meter only (`unseen.rs`). The menu label
-    /// is "Undetected"; it is not a bypass and has nothing to do with anti-cheat.
+    /// Self > Undetected: enemy NPCs' eyesight and alert meter only (`unseen.rs`).
     Unseen,
     /// Self > Ignore only me: enemy NPCs drop what they perceive of the player, at their perception
     /// inbox. Off by default.

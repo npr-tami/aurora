@@ -6,7 +6,7 @@ Read [architecture.md](../../docs/architecture.md) first for the big picture. Th
 
 ## 1. What it is, in one paragraph
 
-`aurora.dll` is a normal Windows DLL. The Launchpad asks the game to load it with Windows' own `LoadLibraryW` (a `CreateRemoteThread` that calls it), so it shows in the game's module list like any overlay. From then on it is part of the game's process: same memory, same threads, same window. It reads and writes the game's memory directly (it *is* the game's process), puts small jumps into the game's code to change one decision, hooks the game's "show this frame" call to draw the menu and ESP, and listens to the keyboard. It talks to the outside only through files in `%APPDATA%\Aurora` and one named pipe that carries two messages. It never hides itself, never touches anti-cheat, the network or accounts, and acts on the player's own character except for Undetected (enemy NPC eyesight).
+`aurora.dll` is a normal Windows DLL. The Launchpad asks the game to load it with Windows' own `LoadLibraryW` (a `CreateRemoteThread` that calls it), so it shows in the game's module list like any overlay. From then on it is part of the game's process: same memory, same threads, same window. It reads and writes the game's memory directly (it *is* the game's process), puts small jumps into the game's code to change one decision, hooks the game's "show this frame" call to draw the menu and ESP, and listens to the keyboard. It talks to the outside only through files in `%APPDATA%\Aurora` and one named pipe that carries two messages. It acts on the player's own character except for Undetected (enemy NPC eyesight).
 
 ## 1b. How to use it, start to finish
 

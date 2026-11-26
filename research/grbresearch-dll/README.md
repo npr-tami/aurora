@@ -98,4 +98,4 @@ Load it only when a research step needs it. Load it once per game.
 
 Check the log for `attached`, then write request files. Unload with `research-unload.request` before rebuilding.
 
-Rules as for the mod: it only watches and records, it never writes game data, and it never acts on other players.
+It only watches and records; it never writes game data.

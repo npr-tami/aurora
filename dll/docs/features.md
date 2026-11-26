@@ -23,7 +23,7 @@ The mod is a DLL loaded into the game's own process, so it can read and write th
 | Feature | Kind | Affects |
 |---|---|---|
 | God Mode | watch + value hold | the player only |
-| Undetected | code patches + cave | every enemy NPC's sight (game AI only; not a bypass) |
+| Undetected | code patches + cave | every enemy NPC's sight (game AI only) |
 | Fly | position hold | the player only |
 | Safe Fly | uses God Mode | the player only |
 | Stand While Flying | 2 code hooks, always on with Fly | the player only |
@@ -80,7 +80,7 @@ Toasts: "God mode on", "God mode off". If the mod doesn't know the player's char
 
 ### Undetected
 
-> **What this is, and what it is not.** "Undetected" is only the menu label. The feature is about the game's enemy NPC AI: whether its computer-controlled soldiers and drones *see* the player and fill their alert meter, like a difficulty change where enemies go blind. It is **not** a bypass, **not** anti-cheat evasion, and **not** hiding the mod or the player from anything. It touches no anti-cheat, network, account or logging code. In code it is `unseen.rs`.
+"Undetected" is about the game's enemy NPC AI: whether its computer-controlled soldiers and drones *see* the player and fill their alert meter, like a difficulty change where enemies go blind. In code it is `unseen.rs`.
 
 **What you see.** Self › Undetected, a switch. Toasts: "Undetected on", "Undetected off".
 

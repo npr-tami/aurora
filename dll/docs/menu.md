@@ -96,7 +96,7 @@ Format: `Row name` [kind] `(Id)`, then `-> Page::X` for sub-pages. Page titles c
 
 - **Self** `Page::SelfTab`
   - God Mode [toggle] `(God)`
-  - Undetected [toggle] `(Unseen)`: enemy NPC eyesight and alert meter only (`unseen.rs`). Only the label says "Undetected"; it is not a bypass and has nothing to do with anti-cheat.
+  - Undetected [toggle] `(Unseen)`: enemy NPC eyesight and alert meter only (`unseen.rs`).
   - Infinite Stamina [toggle] `(Stamina)`
   - Movement [sub-page] -> `Page::Movement`
     - Fly [sub-page] -> `Page::Fly`

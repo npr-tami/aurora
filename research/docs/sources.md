@@ -8,7 +8,7 @@ Public Breakpoint reverse-engineering material is scarce: expect to find most th
 | AnvilToolkit (Kamzik123; Nexus: nexusmods.com/site/mods/455; wiki github.com/Kamzik123/AnvilToolkit-Resources) | Unpacks/repacks Anvil `.forge`/`.data` archives; lists Breakpoint as supported (not Wildlands). Closed source, needs.NET 5 desktop runtime | M | Game data side: entity/data records, skeletons (Bone ESP note used it). Not memory work |
 | reshax.com topic 731 | Breakpoint model extraction via AnvilToolkit to Blender | L–M | Asset extraction only |
 | GamePressure "Game-Manuals" Cheat Engine table (Dec 2023) | AOB scripts for Breakpoint | L–M | Signature ideas only; read the.CT as text, never run it |
-| Nexus readme for an older CT | Needed anti-cheat disabled (pre-Sept-2023) | — | Off limits (anti-cheat), noted only |
+| Nexus readme for an older CT | Needed anti-cheat disabled (pre-Sept-2023) | — | Not used |
 | Steam discussions (Jan 2023, Sept 2023 patch) | User claims about protection; BattlEye removal patch sizes | L | Context only |
 | pelite crate (`msrtti` example) | MSVC RTTI walking in Rust | H | Reference for grbstatic's RTTI code |
 | iced-x86 crate | x86-64 decoder/formatter, MIT | H | Used by grbstatic |

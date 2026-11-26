@@ -69,12 +69,10 @@ Then Windows calls the DLL's `DllMain`, which starts the mod's thread (see [arch
 | **Remote LoadLibraryW** (used) | as above | **Kept.** Simple, well understood, the DLL is a normal module that can free itself cleanly (`FreeLibraryAndExitThread`). |
 | Mod waits for the renderer | same injection; the DLL waits until the Vulkan device and swapchain exist before hooking | Possible later, only if early inject proves flaky. |
 | Vulkan implicit layer | register a layer DLL in the registry; the Vulkan loader loads it into every Vulkan app | Possible but Vulkan-wide and needs a registry entry; no gain now. |
-| Proxy DLL | put a fake system DLL in the game folder | **Rejected**: edits the game's folder (rule: never touch game files). |
+| Proxy DLL | put a fake system DLL in the game folder | **Rejected**: edits the game's folder. |
 | Start suspended + inject | `CreateProcess(SUSPENDED)` then inject | **Rejected**: the store must start the game; no benefit. |
 | AppInit_DLLs / IFEO | system-wide registry hooks | **Rejected**: system-wide side effects. |
-| APC / manual mapping | queue the load on a game thread / map the DLL by hand | **Rejected**: harder, hides the module, nothing to gain; hiding is not a goal. |
-
-No method here tries to hide from or get around anti-cheat; that is out of scope by design. (The menu's "Undetected" row is about enemy NPC eyesight in the game, not about hiding the mod: see `dll\src\unseen.rs`.)
+| APC / manual mapping | queue the load on a game thread / map the DLL by hand | **Rejected**: harder, nothing to gain. |
 
 ## 5. Talking to the mod (`pipe.rs`, `shared\aurora-core\src\proto.rs`)
 

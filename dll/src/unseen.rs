@@ -1,10 +1,6 @@
-//! **What this is, and what it is not.** "Undetected" is only the menu's name for a gameplay switch
-//! about the game's enemy NPC AI: whether its computer-controlled soldiers and drones *see* the
-//! player and fill their orange alert meter. It is NOT a bypass, NOT anti-cheat evasion, and NOT
-//! hiding the mod or the player from anything. It touches no anti-cheat, network, account or
-//! logging code: only the NPCs' eyesight and alert meter
-//! (enemies go blind). In the code and docs it is called `unseen` / NPC perception; "Undetected"
-//! stays only as the menu label.
+//! "Undetected" is the menu's name for a gameplay switch about the game's enemy NPC AI: whether
+//! its computer-controlled soldiers and drones *see* the player and fill their orange alert meter
+//! (enemies go blind). In the code and docs it is called `unseen` / NPC perception.
 //!
 //! Undetected: enemy NPCs don't see the player. The game's sight check loads a sight-range factor
 //! (`movss xmm15, [rcx+0x3c]`) and multiplies what an NPC sees by it; while on, that load jumps to
