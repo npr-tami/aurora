@@ -1,6 +1,5 @@
 //! **Draft,**. Menu > Experiments > "Ignore only me (untested)". Same kind
-//! of switch as Undetected (unseen.rs): the game's enemy NPC AI only, a single-player difficulty
-//! change. It touches no anti-cheat, network or account code.
+//! of switch as Undetected (unseen.rs): the game's enemy NPC AI only. It touches no anti-cheat, network or account code.
 //!
 //! Every enemy NPC's perception goes through one function, its inbox (sub_29cb140 in Steam build
 //! 25349072): sight, the close-range sense, noise and the rest

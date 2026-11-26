@@ -2,7 +2,7 @@
 
 A mod menu for Ghost Recon Breakpoint (PC, Vulkan and DirectX 11), plus the offsets, research tools and notes behind it.
 
-Aurora is made for PvE. It does not touch anti-cheat, network or account code, and it does not hide itself.
+Aurora does not touch anti-cheat, network or account code, and it does not hide itself.
 
 ## Features
 

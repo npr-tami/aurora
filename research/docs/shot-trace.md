@@ -4,7 +4,7 @@ Read-only, offline. Only `grbstatic` and the Ghidra helper were run, on the exe 
 read or touched; no repo code changed; `aurora-dll` was not built.
 
 Purpose: find where the player's shot gets its direction and where it turns into a hit on a character, for two
-planned PvE-only features (NPC/drone targets only): Silent Aim (steer the player's shot to a chosen NPC) and Magic Bullets
+planned features (NPC/drone targets): Silent Aim (steer the player's shot to a chosen NPC) and Magic Bullets
 (the player's shot hits the chosen NPC through walls).
 
 **Build:** `GRB_vulkan-64ff3734`, Steam build 25349072, size 519,231,016, SHA-256 `ab6a37dbac9e9d4f…`

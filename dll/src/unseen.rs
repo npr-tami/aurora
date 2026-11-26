@@ -2,7 +2,7 @@
 //! about the game's enemy NPC AI: whether its computer-controlled soldiers and drones *see* the
 //! player and fill their orange alert meter. It is NOT a bypass, NOT anti-cheat evasion, and NOT
 //! hiding the mod or the player from anything. It touches no anti-cheat, network, account or
-//! logging code: only the NPCs' eyesight and alert meter, a single-player difficulty change
+//! logging code: only the NPCs' eyesight and alert meter
 //! (enemies go blind). In the code and docs it is called `unseen` / NPC perception; "Undetected"
 //! stays only as the menu label.
 //!

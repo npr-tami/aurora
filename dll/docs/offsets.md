@@ -212,7 +212,7 @@ The functions below are taken from community CE tables (Sunbeam's, weapon.rs:3) 
 
 ### 2.11 NPC perception (menu name "Undetected")
 
-This group is only about the game's enemy NPC AI: whether its soldiers and drones see the player and fill their orange alert meter. It is a single-player difficulty switch. It is not a bypass, not anti-cheat related, and it touches no network, account or logging code.
+This group is only about the game's enemy NPC AI: whether its soldiers and drones see the player and fill their orange alert meter. It is not a bypass, not anti-cheat related, and it touches no network, account or logging code.
 
 | Name | Where | Size/type | What it is | How the mod uses it | Status | Source |
 |---|---|---|---|---|---|---|
