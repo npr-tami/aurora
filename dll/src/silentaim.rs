@@ -1,10 +1,6 @@
-//! Silent Aim. **Built** Self > Weapons > Silent Aim, Silent Aim FOV,
-//! Silent Aim Range. Off at inject, like every switch.
-//!
-//! PvE only: the player's shots go towards an AI soldier or a drone near the player's crosshair,
-//! never towards a player. Only the player's own shots change: a co-op partner's are the game's
-//! own. Co-op with friends is fine; there is no player gate any more. Never PvP (Ghost War): the
-//! player's rule, kept by the player; the mod can't tell a PvP match apart.
+//! Legacy Silent Aim and projectile features. Silent Aim is retained in source history but hidden
+//! and unavailable through the menu and command paths. Instant Hit is a standalone projectile
+//! speed modification; it does not select targets or change the shot's direction.
 //!
 //! How (research\docs\shot-trace.md): every bullet is
 //! a shot object, and its origin and direction go in at one function, `0x3652430(shot, float4*
@@ -45,7 +41,8 @@
 //! contact walk to the per-contact verdict (`0x36907e0` calls `0x36af4b0` for each thing the
 //! shot's segment touched this frame). For the player's shot the cave calls the game's function
 //! and turns every verdict but a character's (2) into 1 (skip this contact: no impact, no stop), so
-//! the shot flies on through everything until it meets a character.
+//! the shot flies on through everything until it meets a character, a drone or a turret (their
+//! verdicts stand). A player's 2 becomes 1 as well. Gadgets are left to the game in both hooks.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -62,29 +59,34 @@ const SHOT_SHOOTER: u32 = 0x90;
 /// In a handle: the word whose bit 31 says its entity is there.
 const HANDLE_LIVE: u8 = 0x0C;
 
-/// Our block: the code (under 0x280 bytes), then the target (x y z 0, f32), the mask that clears w,
+/// Our block: the code (under 0x380 bytes), then the target (x y z 0, f32), the mask that clears w,
 /// the "on" word and the least squared distance from the origin to the target. 16-aligned where SSE reads. After them
 /// what the cave saw of the last shot it steered: the shot, its origin, the game's direction, ours,
 /// and a count of steered shots (for the log and the drop measure).
-const TARGET_AT: u64 = 0x280;
-const MASK_AT: u64 = 0x290;
-const ON_AT: u64 = 0x2A0;
-const MIN_AT: u64 = 0x2A4;
-const SHOT_AT: u64 = 0x2A8;
-const ORIGIN_AT: u64 = 0x2B0;
-const OLD_AT: u64 = 0x2C0;
-const NEW_AT: u64 = 0x2D0;
+const TARGET_AT: u64 = 0x380;
+const MASK_AT: u64 = 0x390;
+const ON_AT: u64 = 0x3A0;
+const MIN_AT: u64 = 0x3A4;
+const SHOT_AT: u64 = 0x3A8;
+const ORIGIN_AT: u64 = 0x3B0;
+const OLD_AT: u64 = 0x3C0;
+const NEW_AT: u64 = 0x3D0;
 /// Steered shots, the feature word (`FEAT_*`), all the player's shots.
-const COUNT_AT: u64 = 0x2E0;
-const FEAT_AT: u64 = 0x2E4;
-const ALL_AT: u64 = 0x2E8;
-const BLOCK: usize = 0x300;
-/// The feature word's bits. No Range Loss and Instant Hit: the worker sets them every tick while
-/// Silent Aim is on (0 when off or a player is in the way). Magic Bullets and No Bullet Drop stand
-/// on their own (`standing`), Silent Aim on or off, for all the player's shots.
+const COUNT_AT: u64 = 0x3E0;
+const FEAT_AT: u64 = 0x3E4;
+const ALL_AT: u64 = 0x3E8;
+/// Steer (Silent Aim is on: "on" alone only says there is a target, which Instant Hit uses too),
+/// 1.0 (f32), and a count of shots Instant Hit placed.
+const STEER_AT: u64 = 0x3EC;
+const ONE_AT: u64 = 0x3F0;
+const PLACED_AT: u64 = 0x3F4;
+const BLOCK: usize = 0x400;
+/// The feature word's bits. No Range Loss is the only bit the target worker gates on whether a
+/// player is near the crosshair. Magic Bullets, No Bullet Drop and Instant Hit stand on their own
+/// (`standing`), independently of target selection, for the player's shots.
 /// Magic Bullets: the shot keeps its wall budget and, with the pass hook, every contact that is not
-/// a character is skipped, so it goes through whatever is in the way and hits the first character
-/// on its line, whoever that is.
+/// a character, drone or turret is skipped, so it goes through whatever is in the way and hits the
+/// first AI soldier, drone or turret on its line (players are passed through).
 const FEAT_MAGIC: u32 = 1;
 const FEAT_RANGE: u32 = 2;
 const FEAT_INSTANT: u32 = 4;
@@ -116,7 +118,7 @@ const SHOT_LOCAL_COUNT: u32 = 0x16a;
 /// A point's height sits this far into it.
 const POINT_UP: u8 = 4;
 const POINT_SIZE: u8 = 12;
-/// No Range Loss and Instant Hit skip a shot while a player is this near the crosshair (degrees).
+/// No Range Loss skips a shot while a player is this near the crosshair (degrees).
 const PLAYER_AIM_DEG: f64 = 10.0;
 /// In a shot object (research\docs\shot-trace.md): its origin as it keeps it, and its
 /// position this frame (float4 each); its speed and range (f32), read for the log.
@@ -169,7 +171,7 @@ struct Hook {
 static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 /// The code search or a swap went wrong: off for this session (see the log).
 static BAD: AtomicBool = AtomicBool::new(false);
-/// The worker runs while this is set.
+/// The worker runs while this is set: while Silent Aim or Instant Hit is on.
 static RUN: AtomicBool = AtomicBool::new(false);
 static WORKER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 /// One switch at a time (the menu, a hotkey, a profile and the worker's own turn-off).
@@ -180,8 +182,8 @@ static RANGE: AtomicU32 = AtomicU32::new(0);
 static ON: AtomicBool = AtomicBool::new(false);
 /// Silent Aim Circle: shown while Silent Aim is on. Shown at inject.
 static CIRCLE_HIDDEN: AtomicBool = AtomicBool::new(false);
-/// No Range Loss, Instant Hit: the player's shots only, while Silent Aim is on (they ride its
-/// hook). Off at inject.
+/// No Range Loss: the player's shots only, while Silent Aim is on (it rides the target worker's
+/// hook). Off at inject. Instant Hit is held separately by `INSTANT` and the mover hook below.
 static NO_RANGE: AtomicBool = AtomicBool::new(false);
 static INSTANT: AtomicBool = AtomicBool::new(false);
 /// Magic Bullets and No Bullet Drop: all the player's shots, Silent Aim on or off. They need the
@@ -284,16 +286,58 @@ pub fn instant() -> bool {
     INSTANT.load(Ordering::Relaxed)
 }
 
-/// Instant Hit on or off: a standing bit like Magic Bullets (the shot-build cave marks every one of
-/// the player's bullets while it is on, Silent Aim on or off) and the mover hook with it. The hook failing leaves
-/// the mark alone and says so in the log.
-pub fn set_instant(on: bool) {
-    if let Err(e) = set_standing(&INSTANT, on, "instant hit", "Instant Hit") {
-        log(&format!("instant hit: {e}"));
+/// Instant Hit on or off: a standing bit like Magic Bullets (the shot-build cave starts each of the
+/// player's bullets just short of the depth of the AI soldier or drone under the crosshair, along
+/// the shot's own line), the mover hook, and the worker that picks that target (Silent Aim's, which
+/// keeps running while either is on). On is transactional: if a part cannot start, the parts
+/// already on are turned off again.
+pub fn set_instant(on: bool) -> Result<(), String> {
+    if on {
+        set_standing(&INSTANT, true, "instant hit", "Instant Hit")?;
+        if let Err(e) = move_set(true) {
+            let _ = set_standing(&INSTANT, false, "instant hit", "Instant Hit");
+            return Err(e);
+        }
+        if let Err(e) = worker_for_instant() {
+            let _ = move_set(false);
+            let _ = set_standing(&INSTANT, false, "instant hit", "Instant Hit");
+            return Err(e);
+        }
+        Ok(())
+    } else {
+        if !is_on() {
+            stop_worker();
+            if let Ok(slot) = HOOK.lock()
+                && let Some(h) = slot.as_ref()
+            {
+                write_target(h.block, None);
+            }
+        }
+        let movement = move_set(false);
+        let shot_mark = set_standing(&INSTANT, false, "instant hit", "Instant Hit");
+        movement.and(shot_mark)
     }
-    if let Err(e) = move_set(on) {
-        log(&format!("instant hit: {e}"));
+}
+
+/// The worker for Instant Hit while Silent Aim is off (Silent Aim's own worker serves both).
+fn worker_for_instant() -> Result<(), String> {
+    if RUN.load(Ordering::SeqCst) {
+        return Ok(());
     }
+    stop_worker();
+    let _one = SWITCH.lock().map_err(|_| "silent aim lock")?;
+    if RUN.load(Ordering::SeqCst) || !instant() {
+        return Ok(());
+    }
+    let block = jump_in()?;
+    RUN.store(true, Ordering::SeqCst);
+    let world = entities::WorldList::default();
+    let w = std::thread::spawn(move || worker(block, world));
+    if let Ok(mut s) = WORKER.lock() {
+        *s = Some(w);
+    }
+    log("instant hit: target worker on");
+    Ok(())
 }
 
 pub fn no_drop() -> bool {
@@ -353,19 +397,11 @@ pub fn player_near_aim(eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], deg: 
     })
 }
 
-/// The worker's part of the feature word for this tick: No Range Loss and Instant Hit, each when
-/// its switch is on and no player is near the player's crosshair. Never anything for a shot that
-/// could reach a player. (Magic Bullets and No Bullet Drop are `standing`, not the worker's.)
-pub fn features(eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], on: (bool, bool)) -> u32 {
-    let mut f = 0;
+/// The worker's feature word for this tick: No Range Loss only, and only when no player is near
+/// the player's crosshair. Instant Hit is a standing bit and never passes through this gate.
+pub fn features(eye: [f64; 3], fwd: [f64; 3], players: &[[f64; 3]], no_range: bool) -> u32 {
     let clear = !player_near_aim(eye, fwd, players, PLAYER_AIM_DEG);
-    if on.0 && clear {
-        f |= FEAT_RANGE;
-    }
-    if on.1 && clear {
-        f |= FEAT_INSTANT;
-    }
-    f
+    if no_range && clear { FEAT_RANGE } else { 0 }
 }
 
 /// The circle to draw now: the FOV in degrees, when Silent Aim is on and its circle shown.
@@ -481,6 +517,33 @@ pub fn allowed(c: &Cand) -> bool {
         What::Soldier => !c.dead && matches!(c.side, Some(s) if s != SIDE_FRIENDLY),
         What::Drone => !c.dead,
     }
+}
+
+/// Instant Hit without Silent Aim: how far (world units) a candidate's point may lie off the
+/// crosshair's line and still count as on it (about a body's height from the head).
+pub const LINE_RADIUS: f64 = 1.5;
+
+/// Instant Hit without Silent Aim: of the candidates whose point lies within `radius` of the
+/// crosshair's line (from `eye` along `fwd`), ahead of the eye and within `range` of `me`, the one
+/// nearest along the line (the first the shot would meet); its index.
+pub fn pick_on_line(eye: [f64; 3], fwd: [f64; 3], me: [f64; 3], cands: &[Cand], range: f64, radius: f64) -> Option<usize> {
+    let n = len(fwd);
+    if !n.is_normal() {
+        return None;
+    }
+    let f = [fwd[0] / n, fwd[1] / n, fwd[2] / n];
+    cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| allowed(c) && c.point.iter().all(|v| v.is_finite()) && len(sub(c.point, me)) <= range)
+        .filter_map(|(i, c)| {
+            let v = sub(c.point, eye);
+            let t = v[0] * f[0] + v[1] * f[1] + v[2] * f[2];
+            let off = len([v[0] - f[0] * t, v[1] - f[1] * t, v[2] - f[2] * t]);
+            (t > 0.0 && off <= radius).then_some((i, t))
+        })
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
 }
 
 /// Is a point `off_deg` off the crosshair inside a cone `fov_deg` wide (the circle on screen)?
@@ -670,11 +733,13 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
         c.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, to]); // Mov [rsp+to], rax
     }
     c.extend_from_slice(&[0x48, 0x89, 0x4C, 0x24, 0x50]); // Mov [rsp+0x50], rcx
-    // Steer? Mov eax, [rip+on]; test eax, eax; jz NOSTEER
+    // Steer? Mov eax, [rip+on]; and eax, [rip+steer]; jz NOSTEER (a target, and Silent Aim on)
     c.extend_from_slice(&[0x8B, 0x05]);
     let r = rip(&c, cave + ON_AT)?;
     c.extend_from_slice(&r);
-    c.extend_from_slice(&[0x85, 0xC0]);
+    c.extend_from_slice(&[0x23, 0x05]);
+    let r = rip(&c, cave + STEER_AT)?;
+    c.extend_from_slice(&r);
     jcc(&mut c, &mut to_nosteer, 0x84);
     // xmm0 = (target - origin) with w cleared (xmm1 still holds the origin).
     c.extend_from_slice(&[0x0F, 0x10, 0x05]); // Movups xmm0, [rip+target]
@@ -709,10 +774,13 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&r);
     c.extend_from_slice(&[0x0F, 0x11, 0x44, 0x24, 0x40]); // Movups [rsp+0x40], xmm0
     c.extend_from_slice(&[0x4C, 0x8D, 0x44, 0x24, 0x40]); // Lea r8, [rsp+0x40]
-    // NOSTEER: No Bullet Drop first (the gravity curve out of the local path points, before the game
-    // turns them into the world; the direction at r8 gives the pitch to keep), then call TRAMP (rcx,
-    // rdx untouched; r8 ours or the game's).
+    // NOSTEER: Instant Hit (the origin moved up to just short of the target, along the shot's
+    // direction), then No Bullet Drop (the gravity curve out of the local path points, before the
+    // game turns them into the world; the direction at r8 gives the pitch to keep), then call TRAMP
+    // (rcx untouched; rdx the game's origin or Instant Hit's; r8 ours or the game's).
     let nosteer = c.len();
+    let placed = instant_code(cave, nosteer as u64)?;
+    c.extend_from_slice(&placed);
     // The feature word's rel32 sits 3 bytes into the flatten code, so it counts from there + 4.
     let r = rel(cave + c.len() as u64 + 7, cave + FEAT_AT)?;
     c.extend_from_slice(&flatten_code(r));
@@ -724,6 +792,10 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
     c.extend_from_slice(&[0x44, 0x8B, 0x15]); // Mov r10d, [rip+feat]
     let r = rip(&c, cave + FEAT_AT)?;
     c.extend_from_slice(&r);
+    // Gadgets (a nonzero byte at +0x21 or +0x1C) get none of the writes: with the wall budget a
+    // gadget went through the ground, and Instant Hit's mark would speed it up. Both land on the end.
+    let guard = c.len();
+    c.extend_from_slice(&GADGET_GUARD);
     // Each feature: test r10d, bit; jz past; mov dword [rcx+off], value.
     for (bit, writes) in feature_writes() {
         let mut body: Vec<u8> = Vec::new();
@@ -740,6 +812,10 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
         c.extend_from_slice(&bit.to_le_bytes());
         c.extend_from_slice(&[0x74, body.len() as u8]); // Jz past
         c.extend_from_slice(&body);
+    }
+    let end = c.len();
+    for at in [guard + 5, guard + 11] {
+        c[at] = u8::try_from(end - (at + 1)).map_err(|_| "gadget guard jump too long")?;
     }
     c.extend_from_slice(&[0x48, 0x83, 0xC4, FRAME]); // Add rsp, FRAME
     c.push(0xC3); // ret
@@ -765,6 +841,121 @@ fn cave_code(cave: u64, at: u64, body_root: u64) -> Result<Vec<u8>, String> {
 
 /// Our frame: 0x68 more, so the stack is 16-aligned at the call (entry is 8 off).
 const FRAME: u8 = 0x68;
+/// In our frame: Instant Hit's origin for the game's call (after the shot at +0x50).
+const PLACED_SLOT: u8 = 0x58;
+
+/// Instant Hit, at `at` in the cave, run for every one of the player's shots before the game's
+/// call. With a target ("on") and both the Instant Hit and the Magic Bullets bits set (the shot
+/// starts past anything in its way, so without Magic Bullets it would go through walls; then the
+/// move hook alone makes it arrive at once, stopped by walls as usual): `t` is how far along the shot's
+/// direction (r8, made unit) the target lies from the origin (rdx). More than 1 unit ahead: the
+/// origin becomes origin + direction * (t - 1), its w kept, in a slot of our frame, and rdx points
+/// at it. So the shot starts 1 unit short of the target's depth on its own line: on the target
+/// when Silent Aim steers it, else on the crosshair's line, where the target is only met if the
+/// crosshair is on it. Anything else (no target, behind, too near, not a number): as it came.
+/// Uses rax and xmm0 to xmm5.
+///
+/// ```text
+///   mov eax, [rip+on]; test eax, eax; jz SKIP
+///   mov eax, [rip+feat]; and eax, PLACE_FEATS; cmp eax, PLACE_FEATS; jne SKIP
+///   movups xmm0, [r8]; andps xmm0, [rip+mask]
+///   xmm1 = |xmm0|^2; xorps xmm4, xmm4; comiss xmm1, xmm4; jbe SKIP
+///   sqrtss xmm1, xmm1; shufps xmm1, xmm1, 0; divps xmm0, xmm1
+///   movups xmm1, [rdx]; movups xmm2, [rip+target]; subps xmm2, xmm1; andps xmm2, [rip+mask]
+///   xmm2 = dot(xmm2, xmm0); subss xmm2, [rip+one]; comiss xmm2, xmm4; jbe SKIP
+///   shufps xmm2, xmm2, 0; mulps xmm2, xmm0; addps xmm1, xmm2
+///   movups [rsp+0x58], xmm1; lea rdx, [rsp+0x58]; lock inc dword [rip+placed]
+/// SKIP:
+/// ```
+/// Instant Hit places a shot only with Magic Bullets on too.
+const PLACE_FEATS: u32 = FEAT_INSTANT | FEAT_MAGIC;
+
+fn instant_code(cave: u64, at: u64) -> Result<Vec<u8>, String> {
+    let mut c: Vec<u8> = Vec::new();
+    let mut to_skip: Vec<usize> = Vec::new();
+    let base = cave + at;
+    let jcc = |c: &mut Vec<u8>, list: &mut Vec<usize>, op: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        list.push(c.len() - 4);
+    };
+    // A rip-relative field that ends `after` bytes before the instruction does.
+    let rip = |c: &Vec<u8>, to: u64, after: u64| rel(base + c.len() as u64 + 4 + after, to);
+    c.extend_from_slice(&[0x8B, 0x05]); // Mov eax, [rip+on]
+    let r = rip(&c, cave + ON_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x85, 0xC0]); // Test eax, eax
+    jcc(&mut c, &mut to_skip, 0x84);
+    c.extend_from_slice(&[0x8B, 0x05]); // Mov eax, [rip+feat]
+    let r = rip(&c, cave + FEAT_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x83, 0xE0, PLACE_FEATS as u8]); // And eax, PLACE_FEATS
+    c.extend_from_slice(&[0x83, 0xF8, PLACE_FEATS as u8]); // Cmp eax, PLACE_FEATS
+    jcc(&mut c, &mut to_skip, 0x85);
+    // The unit direction, w 0.
+    c.extend_from_slice(&[0x41, 0x0F, 0x10, 0x00]); // Movups xmm0, [r8]
+    c.extend_from_slice(&[0x0F, 0x54, 0x05]); // Andps xmm0, [rip+mask]
+    let r = rip(&c, cave + MASK_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x0F, 0x28, 0xC8]); // Movaps xmm1, xmm0
+    c.extend_from_slice(&[0x0F, 0x59, 0xC8]); // Mulps xmm1, xmm0
+    c.extend_from_slice(&[0x0F, 0x28, 0xD1]); // Movaps xmm2, xmm1
+    c.extend_from_slice(&[0x0F, 0xC6, 0xD2, 0x55]); // Shufps xmm2, xmm2, 0x55
+    c.extend_from_slice(&[0x0F, 0x28, 0xD9]); // Movaps xmm3, xmm1
+    c.extend_from_slice(&[0x0F, 0xC6, 0xDB, 0xAA]); // Shufps xmm3, xmm3, 0xAA
+    c.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xCA]); // Addss xmm1, xmm2
+    c.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xCB]); // Addss xmm1, xmm3
+    c.extend_from_slice(&[0x0F, 0x57, 0xE4]); // Xorps xmm4, xmm4
+    c.extend_from_slice(&[0x0F, 0x2F, 0xCC]); // Comiss xmm1, xmm4
+    jcc(&mut c, &mut to_skip, 0x86); // Jbe SKIP (0, or not a number)
+    c.extend_from_slice(&[0xF3, 0x0F, 0x51, 0xC9]); // Sqrtss xmm1, xmm1
+    c.extend_from_slice(&[0x0F, 0xC6, 0xC9, 0x00]); // Shufps xmm1, xmm1, 0
+    c.extend_from_slice(&[0x0F, 0x5E, 0xC1]); // Divps xmm0, xmm1
+    // How far along it the target is.
+    c.extend_from_slice(&[0x0F, 0x10, 0x0A]); // Movups xmm1, [rdx]
+    c.extend_from_slice(&[0x0F, 0x10, 0x15]); // Movups xmm2, [rip+target]
+    let r = rip(&c, cave + TARGET_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x0F, 0x5C, 0xD1]); // Subps xmm2, xmm1
+    c.extend_from_slice(&[0x0F, 0x54, 0x15]); // Andps xmm2, [rip+mask]
+    let r = rip(&c, cave + MASK_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x0F, 0x59, 0xD0]); // Mulps xmm2, xmm0
+    c.extend_from_slice(&[0x0F, 0x28, 0xDA]); // Movaps xmm3, xmm2
+    c.extend_from_slice(&[0x0F, 0xC6, 0xDB, 0x55]); // Shufps xmm3, xmm3, 0x55
+    c.extend_from_slice(&[0x0F, 0x28, 0xEA]); // Movaps xmm5, xmm2
+    c.extend_from_slice(&[0x0F, 0xC6, 0xED, 0xAA]); // Shufps xmm5, xmm5, 0xAA
+    c.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xD3]); // Addss xmm2, xmm3
+    c.extend_from_slice(&[0xF3, 0x0F, 0x58, 0xD5]); // Addss xmm2, xmm5
+    c.extend_from_slice(&[0xF3, 0x0F, 0x5C, 0x15]); // Subss xmm2, [rip+one]
+    let r = rip(&c, cave + ONE_AT, 0)?;
+    c.extend_from_slice(&r);
+    c.extend_from_slice(&[0x0F, 0x2F, 0xD4]); // Comiss xmm2, xmm4
+    jcc(&mut c, &mut to_skip, 0x86); // Jbe SKIP (behind, too near, or not a number)
+    // The new origin, w as it was.
+    c.extend_from_slice(&[0x0F, 0xC6, 0xD2, 0x00]); // Shufps xmm2, xmm2, 0
+    c.extend_from_slice(&[0x0F, 0x59, 0xD0]); // Mulps xmm2, xmm0
+    c.extend_from_slice(&[0x0F, 0x58, 0xCA]); // Addps xmm1, xmm2
+    c.extend_from_slice(&[0x0F, 0x11, 0x4C, 0x24, PLACED_SLOT]); // Movups [rsp+0x58], xmm1
+    c.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, PLACED_SLOT]); // Lea rdx, [rsp+0x58]
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]); // Lock inc dword [rip+placed]
+    let r = rip(&c, cave + PLACED_AT, 0)?;
+    c.extend_from_slice(&r);
+    let skip = c.len();
+    for from in to_skip {
+        let r = rel(base + from as u64 + 4, base + skip as u64)?;
+        c[from..from + 4].copy_from_slice(&r);
+    }
+    Ok(c)
+}
+
+/// In a shot: two flag bytes, both set on gadget shots (read live: thrown and launched gadgets 1
+/// and 1, bullets 0 and 0). The game's per-contact function itself skips most contacts for a shot
+/// with `+0x1C` set.
+const SHOT_GADGET_A: u8 = 0x21;
+const SHOT_GADGET_B: u8 = 0x1C;
+/// `cmp byte [rcx+0x21], 0; jne END; cmp byte [rcx+0x1C], 0; jne END` (the two jump lengths are
+/// filled in by `cave_code`).
+const GADGET_GUARD: [u8; 12] = [0x80, 0x79, SHOT_GADGET_A, 0x00, 0x75, 0x00, 0x80, 0x79, SHOT_GADGET_B, 0x00, 0x75, 0x00];
 
 /// The pass hook's place: in the contact walk, the `call` to the per-contact verdict, found by the
 /// instruction before it and the verdict tests after it (`movss [rbp+0xf8], xmm1; call ...; mov
@@ -773,9 +964,18 @@ const FRAME: u8 = 0x68;
 const PASS_SITE: &str = "F3 0F 11 8D F8 00 00 00 E8 ?? ?? ?? ?? 8B C8 85 C0 74 ?? 83 E9 02 0F 84 ?? ?? ?? ?? 83 E9 01 74";
 const PASS_CALL: u64 = 8;
 /// The pass block: code, then the "on" word and a count of verdicts turned (for the log).
-const PASS_ON_AT: u64 = 0x80;
-const PASS_COUNT_AT: u64 = 0x84;
-const PASS_BLOCK: usize = 0x90;
+const PASS_ON_AT: u64 = 0x120;
+const PASS_COUNT_AT: u64 = 0x124;
+/// Test build only: the last 16 skipped contacts (verdict, type word or 0, entity; 16 bytes each,
+/// `PASS_RING_AT`, the next slot from `PASS_IDX_AT`), and a count and the last type of the drones,
+/// parts and turrets kept.
+const PASS_IDX_AT: u64 = 0x128;
+const PASS_KEPT_AT: u64 = 0x12C;
+const PASS_LAST_KEPT_AT: u64 = 0x130;
+const PASS_LAST_ENT_AT: u64 = 0x138;
+const PASS_RING_AT: u64 = 0x140;
+const PASS_RING: u8 = 32;
+const PASS_BLOCK: usize = 0x340;
 /// The per-contact verdicts: 2 is a character (its hit is applied inside the function), 1 is
 /// "skip this contact" (nothing recorded, the walk goes on). Every other verdict (0 passed through
 /// but recorded as an impact, 3 and 4 a wall or the ground that ends the shot, 5 the ignore list)
@@ -783,13 +983,33 @@ const PASS_BLOCK: usize = 0x90;
 /// 3 and 4 into 0 was not enough (seen in game).
 const VERDICT_CHARACTER: u8 = 2;
 const VERDICT_SKIP: u32 = 1;
+/// In the walk's state (rdx of the per-contact call): the contact's entity. On a character the
+/// function puts the character's own entity there before it returns.
+const CONTACT_ENTITY: u32 = 0xC8;
+/// The entity's type word (`entities`: & 7 the main type, bits 10 to 13 the kind, 0x4000 dead).
+const ENTITY_TYPE: u32 = E_TYPE as u32;
+/// Drones (main 5, Azrael 0x110d, ground 0x1115), their parts (main 6, 0x1106), planted turrets
+/// (main 7, 0x1117) and the Azrael's hit body (main 4, 0x111c, seen in game: every shot at an
+/// Azrael meets it first, verdict 0) are no characters: the game gives them 0 (an impact, the
+/// damage comes after the walk) or ends the shot there, and turning that into 1 let the shot fly
+/// through them. Alive and of kind 4 (the world's own copies are kind 1), main 4 to 7: the game's
+/// verdict stands.
+const ENEMY_MASK: u32 = 0x7C07;
+const ENEMY_FIRST: u32 = 0x1004;
+const ENEMY_SPAN: u8 = 3;
 
-/// The pass cave. The game's `call` goes here instead, with the shot in rcx, the hit flags in
-/// rdx and the contact in r8, and the game's return address on the stack. Not on, or not the
-/// player's shot (the same shooter check as `cave_code`): straight on into the game's function
-/// (a jump, so it returns to the game by itself). The player's shot: the game's function is
-/// called from a frame of our own (0x28: home space, and the stack 16-aligned again), then any
-/// verdict but a character's becomes 1 and a count goes up. Uses rax and r10 only before the call.
+/// The pass cave. The game's `call` goes here instead, with the shot in rcx, the walk's state in
+/// rdx and the contact in r8, and the game's return address on the stack. Not on, not the
+/// player's shot (the same shooter check as `cave_code`), or a gadget: straight on into the
+/// game's function (a jump, so it returns to the game by itself). The player's bullet: the game's
+/// function is called from a frame of our own (0x28: home space, the stack 16-aligned again, the
+/// state kept at +0x20), then by the contact's entity (`CONTACT_ENTITY`, its type word):
+/// - verdict 2 (a character): as the game said, unless it is a player (main 1): then 1, so Magic
+///   Bullets never hits a player;
+/// - a living drone, drone part, turret or Azrael hit body (`ENEMY_*`): as the game said;
+/// - anything else, or no entity and not 2: 1 and a count goes up.
+///
+/// Uses rax, r10 and r11 only (the game's call clobbers them anyway).
 fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
     let mut c: Vec<u8> = Vec::new();
     let mut to_tail: Vec<usize> = Vec::new();
@@ -798,6 +1018,15 @@ fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
         list.push(c.len() - 4);
     };
     let rel32 = |from_end: u64, to: u64| (to as i64 - from_end as i64) as i32;
+    // Short jumps forward (op, then a length byte filled in once the place is known).
+    let short = |c: &mut Vec<u8>, op: u8| {
+        c.extend_from_slice(&[op, 0]);
+        c.len() - 1
+    };
+    let land = |c: &mut Vec<u8>, at: usize| {
+        let n = c.len() - (at + 1);
+        c[at] = u8::try_from(n).expect("pass cave short jump too long");
+    };
     // Mov eax, [rip+on]; test eax, eax; jz TAIL
     c.extend_from_slice(&[0x8B, 0x05]);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_ON_AT).to_le_bytes());
@@ -819,25 +1048,79 @@ fn pass_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
     c.extend_from_slice(&body_root.to_le_bytes());
     c.extend_from_slice(&[0x49, 0x3B, 0x02]);
     jcc(&mut c, &mut to_tail, 0x85);
-    // Cmp dword [rcx+0x378], MAGIC_ENERGY; jne TAIL: only shots the shot-build cave marked (the
-    // player's bullets). Grenades and other gadgets carry no mark, so they still stop on the ground.
-    c.extend_from_slice(&[0x81, 0xB9]);
-    c.extend_from_slice(&(SHOT_ENERGY as u32).to_le_bytes());
-    c.extend_from_slice(&MAGIC_ENERGY.to_bits().to_le_bytes());
+    // Gadgets to the game: cmp byte [rcx+0x21], 0; jne TAIL; cmp byte [rcx+0x1C], 0; jne TAIL
+    c.extend_from_slice(&[0x80, 0x79, SHOT_GADGET_A, 0x00]);
     jcc(&mut c, &mut to_tail, 0x85);
-    // Own shot: sub rsp, 0x28; call orig; add rsp, 0x28
+    c.extend_from_slice(&[0x80, 0x79, SHOT_GADGET_B, 0x00]);
+    jcc(&mut c, &mut to_tail, 0x85);
+    // Own bullet: sub rsp, 0x28; mov [rsp+0x20], rdx; call orig; mov r10, [rsp+0x20]; add rsp, 0x28
     c.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]);
+    c.extend_from_slice(&[0x48, 0x89, 0x54, 0x24, 0x20]);
     c.push(0xE8);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, orig).to_le_bytes());
+    c.extend_from_slice(&[0x4C, 0x8B, 0x54, 0x24, 0x20]);
     c.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]);
-    // Cmp eax, 2; je RET (a character: as the game said)
-    c.extend_from_slice(&[0x83, 0xF8, VERDICT_CHARACTER, 0x74, 0x0C]);
-    // FIX: lock inc dword [rip+count]; mov eax, skip
+    // Mov r10, [r10+CONTACT_ENTITY]; mov r9, r10 (kept for the record); test r10, r10; jz NOENT
+    c.extend_from_slice(&[0x4D, 0x8B, 0x92]);
+    c.extend_from_slice(&CONTACT_ENTITY.to_le_bytes());
+    c.extend_from_slice(&[0x4D, 0x8B, 0xCA]);
+    c.extend_from_slice(&[0x4D, 0x85, 0xD2]);
+    let to_noent = short(&mut c, 0x74);
+    // Mov r10d, [r10+ENTITY_TYPE]; cmp eax, 2; jne OTHER
+    c.extend_from_slice(&[0x45, 0x8B, 0x92]);
+    c.extend_from_slice(&ENTITY_TYPE.to_le_bytes());
+    c.extend_from_slice(&[0x83, 0xF8, VERDICT_CHARACTER]);
+    let to_other = short(&mut c, 0x75);
+    // A character: mov r11d, r10d; and r11d, 7; cmp r11d, 1 (a player); je SKIP; ret
+    c.extend_from_slice(&[0x45, 0x8B, 0xDA, 0x41, 0x83, 0xE3, 0x07, 0x41, 0x83, 0xFB, u8::try_from(KIND_PLAYER).unwrap()]);
+    let skip_player = short(&mut c, 0x74);
+    c.push(0xC3);
+    // OTHER: mov r11d, r10d; and r11d, mask; sub r11d, first; cmp r11d, span; ja SKIP (the type
+    // word stays in r10d for the record); a drone or turret: lock inc [kept]; mov [last kept],
+    // r10d; ret
+    land(&mut c, to_other);
+    c.extend_from_slice(&[0x45, 0x8B, 0xDA]);
+    c.extend_from_slice(&[0x41, 0x81, 0xE3]);
+    c.extend_from_slice(&ENEMY_MASK.to_le_bytes());
+    c.extend_from_slice(&[0x41, 0x81, 0xEB]);
+    c.extend_from_slice(&ENEMY_FIRST.to_le_bytes());
+    c.extend_from_slice(&[0x41, 0x83, 0xFB, ENEMY_SPAN]);
+    let skip_other = short(&mut c, 0x77);
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_KEPT_AT).to_le_bytes());
+    c.extend_from_slice(&[0x44, 0x89, 0x15]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_LAST_KEPT_AT).to_le_bytes());
+    c.push(0xC3);
+    // NOENT: cmp eax, 2; jne SKIP; ret
+    land(&mut c, to_noent);
+    c.extend_from_slice(&[0x83, 0xF8, VERDICT_CHARACTER]);
+    let skip_noent = short(&mut c, 0x75);
+    c.push(0xC3);
+    // SKIP: lock inc dword [rip+count]; mov eax, skip; ret
+    for at in [skip_player, skip_other, skip_noent] {
+        land(&mut c, at);
+    }
     c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_COUNT_AT).to_le_bytes());
+    // The record, once per entity in a row: cmp r9, [rip+last]; je past; mov [rip+last], r9;
+    c.extend_from_slice(&[0x4C, 0x3B, 0x0D]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_LAST_ENT_AT).to_le_bytes());
+    let past_rec = short(&mut c, 0x74);
+    c.extend_from_slice(&[0x4C, 0x89, 0x0D]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_LAST_ENT_AT).to_le_bytes());
+    // mov r11d, [rip+idx]; lock inc [rip+idx]; and r11d, 15; shl r11d, 4;
+    // lea rdx, [rip+ring]; add rdx, r11; mov [rdx], eax; mov [rdx+4], r10d; mov [rdx+8], r9
+    c.extend_from_slice(&[0x44, 0x8B, 0x1D]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_IDX_AT).to_le_bytes());
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_IDX_AT).to_le_bytes());
+    c.extend_from_slice(&[0x41, 0x83, 0xE3, PASS_RING - 1, 0x41, 0xC1, 0xE3, 0x04]);
+    c.extend_from_slice(&[0x48, 0x8D, 0x15]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + PASS_RING_AT).to_le_bytes());
+    c.extend_from_slice(&[0x4C, 0x01, 0xDA, 0x89, 0x02, 0x44, 0x89, 0x52, 0x04, 0x4C, 0x89, 0x4A, 0x08]);
+    land(&mut c, past_rec);
     c.push(0xB8);
     c.extend_from_slice(&VERDICT_SKIP.to_le_bytes());
-    // RET
     c.push(0xC3);
     // TAIL: jmp orig
     let tail = c.len();
@@ -868,7 +1151,7 @@ fn pass_prepare() -> Result<Hook, String> {
         return Err("the contact verdict call crosses a code word".into());
     }
     let block = memory::alloc_code_near(exe.base, PASS_BLOCK).ok_or("no room for the magic bullets code")?;
-    memory::write(block + PASS_ON_AT, &[0u8; 8])?;
+    memory::write(block + PASS_ON_AT, &[0u8; PASS_BLOCK - PASS_ON_AT as usize])?;
     memory::write(block, &pass_code(block, orig, body_root))?;
     let old_bytes = memory::read(word, 8)?;
     let old = u64::from_le_bytes(old_bytes.clone().try_into().unwrap());
@@ -936,9 +1219,13 @@ fn pass_set(on: bool) -> Result<(), String> {
 const MOVE_SITE: &str = "74 0B 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 0F 28 CE 48 8B CF E8 ?? ?? ?? ?? 85 C0 48 8B CF 0F 95 C0 88 47 22";
 const MOVE_CALL: u64 = 19;
 /// The move block: code, then the "on" word and a count of shots sped up (for the log).
-const MOVE_ON_AT: u64 = 0x40;
-const MOVE_COUNT_AT: u64 = 0x44;
-const MOVE_BLOCK: usize = 0x50;
+const MOVE_ON_AT: u64 = 0xA0;
+const MOVE_COUNT_AT: u64 = 0xA4;
+/// Test build only: every call seen while on, the last shot's `+0xC` and the last shot.
+const MOVE_CALLS_AT: u64 = 0xA8;
+const MOVE_LAST_SPEED_AT: u64 = 0xAC;
+const MOVE_LAST_SHOT_AT: u64 = 0xB0;
+const MOVE_BLOCK: usize = 0xC0;
 /// The mover's speed and carry-over flag.
 const SHOT_MOVE_SPEED: u32 = 0x10;
 const SHOT_CARRY: u32 = 0x374;
@@ -948,31 +1235,68 @@ const INSTANT_MOVE: f32 = 1.0e8;
 
 /// The move cave. The game's `call` goes here instead (shot in rcx, frame time in xmm1, the
 /// game's return address on the stack); it always jumps on into the mover, so it returns to the
-/// game by itself. On and the shot carries Instant Hit's mark (`+0xC` = `INSTANT_SPEED`, written
-/// by the shot-build cave into the player's bullets only): the mover speed becomes `INSTANT_MOVE`,
-/// the carry-over flag 1 and a count goes up. Uses rax only.
+/// game by itself. On, the player's shot (the same shooter check as `pass_code`) and no gadget
+/// (`+0x21`, `+0x1C`): the mover speed becomes `INSTANT_MOVE`, the carry-over flag 1 and a count
+/// goes up, so the shot walks its whole path in its first frame and the game's own sweep checks
+/// all of it at once (walls stop it as usual, unless Magic Bullets is on). The shot's `+0xC` is no
+/// use as a mark here: the game sets it again before this call (seen in game: the mark written at
+/// build was never seen here). Uses rax and r10 only.
 ///
 /// ```text
 ///   mov eax, [rip+on]; test eax, eax; jz TAIL
-///   cmp dword [rcx+0xC], INSTANT_SPEED; jne TAIL
+///   lock inc dword [rip+calls]                                  (test build only)
+///   mov rax, [rcx+0x90]; test rax, rax; jz TAIL
+///   cmp dword [rax+0xC], 0; jge TAIL; mov rax, [rax]; test rax, rax; jz TAIL
+///   mov r10, body_root; cmp rax, [r10]; jne TAIL
+///   cmp byte [rcx+0x21], 0; jne TAIL; cmp byte [rcx+0x1C], 0; jne TAIL
+///   mov eax, [rcx+0xC]; mov [rip+last speed], eax; mov [rip+last shot], rcx   (test build only)
 ///   mov dword [rcx+0x10], INSTANT_MOVE
 ///   mov byte [rcx+0x374], 1
 ///   lock inc dword [rip+count]
 /// TAIL: jmp orig
 /// ```
-fn move_code(cave: u64, orig: u64) -> Vec<u8> {
+fn move_code(cave: u64, orig: u64, body_root: u64) -> Vec<u8> {
     let mut c: Vec<u8> = Vec::new();
     let rel32 = |from_end: u64, to: u64| (to as i64 - from_end as i64) as i32;
+    let mut to_tail: Vec<usize> = Vec::new();
+    let jcc = |c: &mut Vec<u8>, list: &mut Vec<usize>, op: u8| {
+        c.extend_from_slice(&[0x0F, op, 0, 0, 0, 0]);
+        list.push(c.len() - 4);
+    };
     c.extend_from_slice(&[0x8B, 0x05]);
     c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_ON_AT).to_le_bytes());
     c.extend_from_slice(&[0x85, 0xC0]);
-    let mut to_tail: Vec<usize> = Vec::new();
-    c.extend_from_slice(&[0x0F, 0x84, 0, 0, 0, 0]);
-    to_tail.push(c.len() - 4);
-    c.extend_from_slice(&[0x81, 0x79, SHOT_SPEED as u8]);
-    c.extend_from_slice(&INSTANT_SPEED.to_bits().to_le_bytes());
-    c.extend_from_slice(&[0x0F, 0x85, 0, 0, 0, 0]);
-    to_tail.push(c.len() - 4);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Test build only: lock inc [rip+calls]
+    c.extend_from_slice(&[0xF0, 0xFF, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_CALLS_AT).to_le_bytes());
+    // The player's shot: mov rax, [rcx+SHOT_SHOOTER]; test rax, rax; jz TAIL
+    c.extend_from_slice(&[0x48, 0x8B, 0x81]);
+    c.extend_from_slice(&SHOT_SHOOTER.to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Cmp dword [rax+0xC], 0; jge TAIL (bit 31 clear: no entity)
+    c.extend_from_slice(&[0x83, 0x78, HANDLE_LIVE, 0x00]);
+    jcc(&mut c, &mut to_tail, 0x8D);
+    // Mov rax, [rax]; test rax, rax; jz TAIL
+    c.extend_from_slice(&[0x48, 0x8B, 0x00, 0x48, 0x85, 0xC0]);
+    jcc(&mut c, &mut to_tail, 0x84);
+    // Mov r10, body_root; cmp rax, [r10]; jne TAIL
+    c.extend_from_slice(&[0x49, 0xBA]);
+    c.extend_from_slice(&body_root.to_le_bytes());
+    c.extend_from_slice(&[0x49, 0x3B, 0x02]);
+    jcc(&mut c, &mut to_tail, 0x85);
+    // Gadgets as the game moves them: cmp byte [rcx+0x21], 0; jne TAIL; cmp byte [rcx+0x1C], 0; jne TAIL
+    c.extend_from_slice(&[0x80, 0x79, SHOT_GADGET_A, 0x00]);
+    jcc(&mut c, &mut to_tail, 0x85);
+    c.extend_from_slice(&[0x80, 0x79, SHOT_GADGET_B, 0x00]);
+    jcc(&mut c, &mut to_tail, 0x85);
+    // Test build only: mov eax, [rcx+0xC]; mov [rip+last speed], eax; mov [rip+last shot], rcx
+    c.extend_from_slice(&[0x8B, 0x41, SHOT_SPEED as u8, 0x89, 0x05]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_LAST_SPEED_AT).to_le_bytes());
+    c.extend_from_slice(&[0x48, 0x89, 0x0D]);
+    c.extend_from_slice(&rel32(cave + c.len() as u64 + 4, cave + MOVE_LAST_SHOT_AT).to_le_bytes());
+    // Mov dword [rcx+0x10], INSTANT_MOVE; mov byte [rcx+0x374], 1; lock inc [rip+count]
     c.extend_from_slice(&[0xC7, 0x41, SHOT_MOVE_SPEED as u8]);
     c.extend_from_slice(&INSTANT_MOVE.to_bits().to_le_bytes());
     c.extend_from_slice(&[0xC6, 0x81]);
@@ -995,6 +1319,7 @@ static MOVE_BAD: AtomicBool = AtomicBool::new(false);
 /// The move hook's code search and block, once. Called with `MOVE` locked.
 fn move_prepare() -> Result<Hook, String> {
     let exe = memory::find_module("").ok_or("no exe")?;
+    let body_root = exe.base + globals::BODY_ROOT.rva().ok_or("the player's body's place was not found")?;
     let hit = memory::find_code(&exe, "instant hit mover call", MOVE_SITE)?;
     let at = hit + MOVE_CALL;
     let bytes = memory::read(at, 5)?;
@@ -1007,8 +1332,8 @@ fn move_prepare() -> Result<Hook, String> {
         return Err("the mover call crosses a code word".into());
     }
     let block = memory::alloc_code_near(exe.base, MOVE_BLOCK).ok_or("no room for the instant hit code")?;
-    memory::write(block + MOVE_ON_AT, &[0u8; 8])?;
-    memory::write(block, &move_code(block, orig))?;
+    memory::write(block + MOVE_ON_AT, &[0u8; MOVE_BLOCK - MOVE_ON_AT as usize])?;
+    memory::write(block, &move_code(block, orig, body_root))?;
     let old_bytes = memory::read(word, 8)?;
     let old = u64::from_le_bytes(old_bytes.clone().try_into().unwrap());
     let mut new_bytes = old_bytes;
@@ -1188,6 +1513,8 @@ fn prepare() -> Result<Hook, String> {
     data.extend_from_slice(&0u32.to_le_bytes()); // on: 0
     data.extend_from_slice(&MIN_LEN2.to_le_bytes());
     data.resize(BLOCK - TARGET_AT as usize, 0); // The shot record and the count start at 0
+    let one = (ONE_AT - TARGET_AT) as usize;
+    data[one..one + 4].copy_from_slice(&1f32.to_le_bytes());
     memory::write(block + TARGET_AT, &data)?;
     memory::write(block, &cave_code(block, at, body_root)?)?;
     let old_bytes = memory::read(word, 8)?;
@@ -1228,6 +1555,7 @@ fn write_target(block: u64, p: Option<[f64; 3]>) {
             }
             b.extend_from_slice(&0f32.to_le_bytes());
             let _ = memory::write(block + TARGET_AT, &b);
+            let _ = memory::write(block + STEER_AT, &u32::from(is_on()).to_le_bytes());
             let _ = memory::write(block + ON_AT, &1u32.to_le_bytes());
         }
         None => {
@@ -1270,7 +1598,9 @@ pub fn set(on: bool) -> Result<(), String> {
         switch_on()
     } else {
         switch_off("off");
-        stop_worker();
+        if !instant() {
+            stop_worker();
+        }
         Ok(())
     }
 }
@@ -1334,11 +1664,17 @@ fn jump_in() -> Result<u64, String> {
 /// feature word keeps their bits alone).
 fn switch_off(why: &str) {
     let Ok(_one) = SWITCH.lock() else { return };
-    RUN.store(false, Ordering::SeqCst);
+    // Instant Hit keeps the worker (and its target); only the steering stops.
+    if !instant() {
+        RUN.store(false, Ordering::SeqCst);
+    }
     AIM.store(false, Ordering::SeqCst);
     let Ok(mut slot) = HOOK.lock() else { return };
     let Some(h) = slot.as_mut() else { return };
-    write_target(h.block, None);
+    let _ = memory::write(h.block + STEER_AT, &0u32.to_le_bytes());
+    if !instant() {
+        write_target(h.block, None);
+    }
     let keep = standing();
     if keep != 0 {
         write_feat(h.block, keep);
@@ -1630,7 +1966,7 @@ fn worker(block: u64, mut world: entities::WorldList) {
         if last_scan.elapsed() >= SCAN_EVERY {
             last_scan = Instant::now();
             // A little past the range: a body walking in is known by the next tick.
-            let reach = range_units(range_m()) + 50.0;
+            let reach = range_units(if is_on() { range_m() } else { RANGE_MAX }) + 50.0;
             let list = match world.pass(reach, 500) {
                 Ok(l) => Some(l),
                 Err(e) => {
@@ -1673,7 +2009,8 @@ fn worker(block: u64, mut world: entities::WorldList) {
             // A body re-read as a player comes back as `What::Player`, which `pick` never takes.
             let now: Vec<(Cand, Aimed)> = seen.iter().filter_map(now).collect();
             let cands: Vec<Cand> = now.iter().map(|n| n.0).collect();
-            pick(eye, fwd, me, &cands, fov(), range_units(range_m()), priority()).map(|i| (now[i].1, me))
+            let i = if is_on() { pick(eye, fwd, me, &cands, fov(), range_units(range_m()), priority()) } else { pick_on_line(eye, fwd, me, &cands, range_units(RANGE_MAX), LINE_RADIUS) };
+            i.map(|i| (now[i].1, me))
         })();
         // Raised for drop by the median of the player's last shots (`Drop`), from the player's body
         // (the shot starts at the camera, near it).
@@ -1692,14 +2029,14 @@ fn worker(block: u64, mut world: entities::WorldList) {
                 a.part
             ));
         }
-        // The feature word: nothing while the lists can't be read or a player is in the way.
+        // Target-dependent features wait while the lists can't be read or a player is in the way.
         let lists_ok = !seen.is_empty() || !players.is_empty();
         // Magic Bullets and No Bullet Drop aim at nobody, so they need no player check.
         let standing = standing();
         let feat = match view {
             Some((fwd, _, eye)) if lists_ok => {
                 let pl: Vec<[f64; 3]> = players.iter().filter_map(|b| entities::pos_of(*b)).map(|p| [p[0], p[1], p[2] + CHEST_UP]).collect();
-                features(eye, fwd, &pl, (no_range(), false)) | standing
+                features(eye, fwd, &pl, no_range()) | standing
             }
             _ => standing,
         };
@@ -1772,6 +2109,21 @@ mod tests {
 
     fn soldier(p: [f64; 3]) -> Cand {
         Cand { what: What::Soldier, point: p, dead: false, side: Some(3) }
+    }
+
+    #[test]
+    fn pick_on_line_takes_the_first_on_the_crosshair_line() {
+        let c = [
+            soldier([0.0, 100.0, 1.6]),  // 0: on the line, far
+            soldier([0.8, 40.0, 2.2]),   // 1: on the line (0.8 off sideways, 0.6 up), near
+            soldier([3.0, 20.0, 1.6]),   // 2: nearer but 3 off the line
+            soldier([0.0, -10.0, 1.6]),  // 3: behind
+        ];
+        assert_eq!(pick_on_line(EYE, FWD, ME, &c, 1000.0, LINE_RADIUS), Some(1));
+        assert_eq!(pick_on_line(EYE, FWD, ME, &c[2..], 1000.0, LINE_RADIUS), None);
+        assert_eq!(pick_on_line(EYE, FWD, ME, &c[..1], 50.0, LINE_RADIUS), None);
+        assert_eq!(pick_on_line(EYE, [0.0, 2.0, 0.0], ME, &c, 1000.0, LINE_RADIUS), Some(1));
+        assert_eq!(pick_on_line(EYE, [0.0; 3], ME, &c, 1000.0, LINE_RADIUS), None);
     }
 
     #[test]
@@ -1904,10 +2256,13 @@ mod tests {
         // to GO.
         let lea = c.windows(5).position(|w| w == [0x4C, 0x8D, 0x44, 0x24, 0x40]).unwrap();
         let nosteer = lea + 5;
+        let placed = instant_code(cave, nosteer as u64).unwrap();
+        assert_eq!(&c[nosteer..nosteer + placed.len()], &placed[..]);
+        let flat_at = nosteer + placed.len();
         let flat = flatten_code([0; 4]);
-        let call = nosteer + flat.len();
-        assert_eq!(&c[nosteer..nosteer + 3], &[0x44, 0x8B, 0x15]);
-        assert_eq!(&c[nosteer + 7..call], &flat[7..]);
+        let call = flat_at + flat.len();
+        assert_eq!(&c[flat_at..flat_at + 3], &[0x44, 0x8B, 0x15]);
+        assert_eq!(&c[flat_at + 7..call], &flat[7..]);
         assert_eq!(c[call], 0xE8);
         let r = i32::from_le_bytes(c[call + 1..call + 5].try_into().unwrap());
         assert_eq!((cave + call as u64 + 5).wrapping_add_signed(i64::from(r)), cave + go as u64);
@@ -1943,13 +2298,24 @@ mod tests {
         assert_eq!(feats.len(), 2);
         assert!(feats.iter().all(|k| rip_at(*k) == cave + FEAT_AT));
         let incs: Vec<usize> = c.windows(3).enumerate().filter(|(_, w)| *w == [0xF0, 0xFF, 0x05]).map(|(i, _)| i + 3).collect();
-        assert_eq!(incs.iter().map(|k| rip_at(*k)).collect::<Vec<_>>(), [cave + ALL_AT, cave + COUNT_AT]);
-        // The second "mov eax, [rip+on]" (the steer check) reads "on" too.
+        assert_eq!(incs.iter().map(|k| rip_at(*k)).collect::<Vec<_>>(), [cave + ALL_AT, cave + COUNT_AT, cave + PLACED_AT]);
+        // The second "mov eax, [rip+on]" (the steer check) reads "on" too, and steer with it;
+        // the third is Instant Hit's.
         let movs: Vec<usize> = c.windows(2).enumerate().filter(|(_, w)| *w == [0x8B, 0x05]).map(|(i, _)| i + 2).collect();
-        assert!(movs.iter().take(2).all(|k| rip_at(*k) == cave + ON_AT));
+        assert_eq!(movs.len(), 4);
+        assert!(movs.iter().take(3).all(|k| rip_at(*k) == cave + ON_AT));
+        assert_eq!(rip_at(movs[3]), cave + FEAT_AT);
+        assert_eq!(&c[movs[1] + 4..movs[1] + 6], &[0x23, 0x05]);
+        assert_eq!(rip_at(movs[1] + 6), cave + STEER_AT);
         // The features: each test's jz lands on the next test, or on the frame's end.
         let end = c.windows(4).position(|w| w == [0x48, 0x83, 0xC4, FRAME]).unwrap();
         let mut k = call + 5 + 5 + 7;
+        // The gadget guard: both jne land on the frame's end.
+        let guard = k;
+        assert_eq!(&c[k..k + 4], &[0x80, 0x79, 0x21, 0x00]);
+        assert_eq!(&c[k + 6..k + 10], &[0x80, 0x79, 0x1C, 0x00]);
+        assert_eq!((c[k + 4], c[k + 10]), (0x75, 0x75));
+        k += GADGET_GUARD.len();
         for (bit, writes) in feature_writes() {
             assert_eq!(&c[k..k + 3], &[0x41, 0xF7, 0xC2], "test at {k}");
             assert_eq!(u32::from_le_bytes(c[k + 3..k + 7].try_into().unwrap()), bit);
@@ -1966,6 +2332,8 @@ mod tests {
             k += 9 + body.len();
         }
         assert_eq!(k, end);
+        assert_eq!(guard + 6 + usize::from(c[guard + 5]), end);
+        assert_eq!(guard + 12 + usize::from(c[guard + 11]), end);
         assert_eq!(c[end + 4], 0xC3);
         // The frame keeps the stack 16-aligned at the call; the player's stack slots 5 to 7 copied.
         assert_eq!((8 + u32::from(FRAME)) % 16, 0);
@@ -1977,6 +2345,8 @@ mod tests {
         assert_eq!(u64::from_le_bytes(c[k..k + 8].try_into().unwrap()), root);
         assert!(TARGET_AT.is_multiple_of(16) && MASK_AT.is_multiple_of(16) && ORIGIN_AT.is_multiple_of(16));
         assert!(ALL_AT + 4 <= BLOCK as u64);
+        assert!(ONE_AT.is_multiple_of(4) && PLACED_AT + 4 <= BLOCK as u64 && STEER_AT == ALL_AT + 4);
+        assert!(u32::from(PLACED_SLOT) + 16 <= u32::from(FRAME));
         // What the features write.
         assert_eq!(feature_writes()[0].1, vec![(0x378, 1.0e6f32.to_bits())]);
         assert_eq!(feature_writes()[1].1, vec![(0x158, 10_000f32.to_bits())]);
@@ -2064,37 +2434,36 @@ mod tests {
         }
     }
 
-    /// Never anything for a shot that could reach a player: No Range Loss and Instant Hit not with
-    /// a player near the player's crosshair; each only when its switch is on. Magic Bullets and No
-    /// Bullet Drop are not the worker's (`standing`), so they never show here.
+    /// No Range Loss alone is gated by nearby players. Instant Hit is a standing bit and is not
+    /// part of this worker result.
     #[test]
     fn features_hold_back_for_players() {
-        let all = (true, true);
-        assert_eq!(features(EYE, FWD, &[], all), FEAT_RANGE | FEAT_INSTANT);
-        assert_eq!(features(EYE, FWD, &[], (false, false)), 0);
-        assert_eq!(features(EYE, FWD, &[], (true, false)), FEAT_RANGE);
-        assert_eq!(features(EYE, FWD, &[], (false, true)), FEAT_INSTANT);
+        assert_eq!(features(EYE, FWD, &[], true), FEAT_RANGE);
+        assert_eq!(features(EYE, FWD, &[], false), 0);
         // A co-op partner near the crosshair (8 deg): nothing.
         let beside = [50.0 * 8f64.to_radians().tan(), 50.0, 1.6];
-        assert_eq!(features(EYE, FWD, &[beside], all), 0);
-        // Friend far off to the side (40 deg): everything.
-        assert_eq!(features(EYE, FWD, &[[40.0, 50.0, 1.6]], all), FEAT_RANGE | FEAT_INSTANT);
+        assert_eq!(features(EYE, FWD, &[beside], true), 0);
+        // A player far off to the side (40 deg) does not hold No Range Loss back.
+        assert_eq!(features(EYE, FWD, &[[40.0, 50.0, 1.6]], true), FEAT_RANGE);
         // A position that is not a number counts as in the way.
-        assert_eq!(features(EYE, FWD, &[[f64::NAN, 1.0, 1.0]], all), 0);
+        assert_eq!(features(EYE, FWD, &[[f64::NAN, 1.0, 1.0]], true), 0);
         // The standing bits: Magic Bullets 1, No Bullet Drop 8, both off at inject.
         assert_eq!((FEAT_MAGIC, FEAT_NODROP), (1, 8));
         assert_eq!(standing(), 0);
     }
 
-    /// The pass cave: six near jumps to TAIL (the jump into the game's function), the shooter
-    /// check through the root, the bullet mark, the call from a 0x28 frame, a character's verdict returned as it
-    /// came, every other verdict 1 with the count.
+    /// The pass cave: seven near jumps to TAIL (the jump into the game's function: off, the
+    /// shooter check through the root, the two gadget flags), the call from a 0x28 frame with the
+    /// walk's state kept, then the verdict by the contact's entity: a character's as it came
+    /// unless a player's, a drone's or turret's as it came, every other one 1 with the count.
     #[test]
     fn pass_code_jumps_and_verdicts() {
         let (cave, orig, root) = (0x7ff6_1000_0000u64, 0x7ff6_136a_f4b0u64, 0x7ff6_0a00_0000u64);
         let c = pass_code(cave, orig, root);
         assert!(c.len() as u64 <= PASS_ON_AT, "{} bytes", c.len());
+        assert!(PASS_COUNT_AT + 4 <= PASS_BLOCK as u64);
         let rel_at = |k: usize| (cave + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
+        let find = |w: &[u8]| c.windows(w.len()).position(|x| x == w).unwrap();
         // The on word.
         assert_eq!(&c[..2], &[0x8B, 0x05]);
         assert_eq!(rel_at(2), cave + PASS_ON_AT);
@@ -2102,64 +2471,182 @@ mod tests {
         let tail = c.len() - 5;
         assert_eq!(c[tail], 0xE9);
         assert_eq!(rel_at(tail + 1), orig);
+        let sub = find(&[0x48, 0x83, 0xEC, 0x28]);
         let mut jumps = 0;
-        for i in 0..tail {
-            if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x8D) && i + 6 <= tail {
+        for i in 0..sub {
+            if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x8D) {
                 assert_eq!(rel_at(i + 2), cave + tail as u64, "jump at {i}");
                 jumps += 1;
             }
         }
-        assert_eq!(jumps, 6);
-        // The bullet mark: cmp dword [rcx+0x378], 1.0e6.
-        let m = c.windows(2).position(|w| w == [0x81, 0xB9]).unwrap();
-        assert_eq!(u32::from_le_bytes(c[m + 2..m + 6].try_into().unwrap()), 0x378);
-        assert_eq!(u32::from_le_bytes(c[m + 6..m + 10].try_into().unwrap()), 1.0e6f32.to_bits());
-        // The root, the frame and the call.
-        let k = c.windows(2).position(|w| w == [0x49, 0xBA]).unwrap() + 2;
+        assert_eq!(jumps, 7);
+        // The root, the gadget flags.
+        let k = find(&[0x49, 0xBA]) + 2;
         assert_eq!(u64::from_le_bytes(c[k..k + 8].try_into().unwrap()), root);
-        let sub = c.windows(4).position(|w| w == [0x48, 0x83, 0xEC, 0x28]).unwrap();
-        assert_eq!(c[sub + 4], 0xE8);
-        assert_eq!(rel_at(sub + 5), orig);
-        assert_eq!(&c[sub + 9..sub + 13], &[0x48, 0x83, 0xC4, 0x28]);
-        // Cmp eax, 2; je RET; FIX: lock inc [count]; mov eax, 1; RET: ret
-        let t = sub + 13;
-        assert_eq!(&c[t..t + 5], &[0x83, 0xF8, 2, 0x74, 0x0C]);
-        let fix = t + 5;
-        assert_eq!(&c[fix..fix + 3], &[0xF0, 0xFF, 0x05]);
-        assert_eq!(rel_at(fix + 3), cave + PASS_COUNT_AT);
-        assert_eq!(&c[fix + 7..fix + 12], &[0xB8, 1, 0, 0, 0]);
-        assert_eq!(c[fix + 12], 0xC3);
-        assert_eq!(t + 5 + 0x0C, fix + 12, "je lands on ret");
-        assert_eq!(fix + 13, tail);
-        assert!(PASS_COUNT_AT + 4 <= PASS_BLOCK as u64);
+        let g = find(&[0x80, 0x79, 0x21, 0x00]);
+        assert_eq!(&c[g + 4..g + 6], &[0x0F, 0x85]);
+        assert_eq!(&c[g + 10..g + 14], &[0x80, 0x79, 0x1C, 0x00]);
+        assert_eq!(&c[g + 14..g + 16], &[0x0F, 0x85]);
+        assert_eq!(g + 20, sub);
+        // The frame: state kept at +0x20 round the call, read back into r10.
+        assert_eq!(&c[sub + 4..sub + 9], &[0x48, 0x89, 0x54, 0x24, 0x20]);
+        assert_eq!(c[sub + 9], 0xE8);
+        assert_eq!(rel_at(sub + 10), orig);
+        assert_eq!(&c[sub + 14..sub + 23], &[0x4C, 0x8B, 0x54, 0x24, 0x20, 0x48, 0x83, 0xC4, 0x28]);
+        // The entity (also kept in r9) and its type word.
+        let e = sub + 23;
+        assert_eq!(&c[e..e + 7], &[0x4D, 0x8B, 0x92, 0xC8, 0, 0, 0]);
+        assert_eq!(&c[e + 7..e + 14], &[0x4D, 0x8B, 0xCA, 0x4D, 0x85, 0xD2, 0x74]);
+        let noent = e + 15 + usize::from(c[e + 14]);
+        let t = e + 15;
+        assert_eq!(&c[t..t + 7], &[0x45, 0x8B, 0x92, 0x08, 0x01, 0, 0]);
+        assert_eq!(&c[t + 7..t + 11], &[0x83, 0xF8, 2, 0x75]);
+        let other = t + 12 + usize::from(c[t + 11]);
+        // A character: a player is skipped, else ret.
+        let ch = t + 12;
+        assert_eq!(&c[ch..ch + 12], &[0x45, 0x8B, 0xDA, 0x41, 0x83, 0xE3, 0x07, 0x41, 0x83, 0xFB, 1, 0x74]);
+        let skip = ch + 13 + usize::from(c[ch + 12]);
+        assert_eq!(c[ch + 13], 0xC3);
+        assert_eq!(other, ch + 14);
+        // Drones, parts, turrets, the Azrael's hit body: alive, kind 4, main 4 to 7 (in r11d); kept are counted.
+        assert_eq!(&c[other..other + 6], &[0x45, 0x8B, 0xDA, 0x41, 0x81, 0xE3]);
+        assert_eq!(u32::from_le_bytes(c[other + 6..other + 10].try_into().unwrap()), 0x7C07);
+        assert_eq!(&c[other + 10..other + 13], &[0x41, 0x81, 0xEB]);
+        assert_eq!(u32::from_le_bytes(c[other + 13..other + 17].try_into().unwrap()), 0x1004);
+        assert_eq!(&c[other + 17..other + 22], &[0x41, 0x83, 0xFB, 3, 0x77]);
+        assert_eq!(other + 23 + usize::from(c[other + 22]), skip);
+        let k = other + 23;
+        assert_eq!(&c[k..k + 3], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(k + 3), cave + PASS_KEPT_AT);
+        assert_eq!(&c[k + 7..k + 10], &[0x44, 0x89, 0x15]);
+        assert_eq!(rel_at(k + 10), cave + PASS_LAST_KEPT_AT);
+        assert_eq!(c[k + 14], 0xC3);
+        // No entity: a character's verdict stands, else skipped.
+        assert_eq!(noent, k + 15);
+        assert_eq!(&c[noent..noent + 4], &[0x83, 0xF8, 2, 0x75]);
+        assert_eq!(noent + 5 + usize::from(c[noent + 4]), skip);
+        assert_eq!(c[noent + 5], 0xC3);
+        // SKIP: lock inc [count]; the record; mov eax, 1; ret; then TAIL.
+        assert_eq!(skip, noent + 6);
+        assert_eq!(&c[skip..skip + 3], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(skip + 3), cave + PASS_COUNT_AT);
+        assert_eq!(&c[skip + 7..skip + 10], &[0x4C, 0x3B, 0x0D]);
+        assert_eq!(rel_at(skip + 10), cave + PASS_LAST_ENT_AT);
+        assert_eq!(c[skip + 14], 0x74);
+        assert_eq!(skip + 16 + usize::from(c[skip + 15]), tail - 6);
+        assert_eq!(&c[skip + 16..skip + 19], &[0x4C, 0x89, 0x0D]);
+        assert_eq!(rel_at(skip + 19), cave + PASS_LAST_ENT_AT);
+        let r = skip + 23;
+        assert_eq!(&c[r..r + 3], &[0x44, 0x8B, 0x1D]);
+        assert_eq!(rel_at(r + 3), cave + PASS_IDX_AT);
+        assert_eq!(&c[r + 7..r + 10], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(r + 10), cave + PASS_IDX_AT);
+        assert_eq!(&c[r + 14..r + 22], &[0x41, 0x83, 0xE3, 31, 0x41, 0xC1, 0xE3, 0x04]);
+        assert_eq!(&c[r + 22..r + 25], &[0x48, 0x8D, 0x15]);
+        assert_eq!(rel_at(r + 25), cave + PASS_RING_AT);
+        assert_eq!(&c[r + 29..r + 42], &[0x4C, 0x01, 0xDA, 0x89, 0x02, 0x44, 0x89, 0x52, 0x04, 0x4C, 0x89, 0x4A, 0x08]);
+        assert_eq!(&c[r + 42..r + 48], &[0xB8, 1, 0, 0, 0, 0xC3]);
+        assert_eq!(r + 48, tail);
+        assert!(PASS_RING_AT + u64::from(PASS_RING) * 16 <= PASS_BLOCK as u64);
+        assert!(PASS_LAST_KEPT_AT + 4 <= PASS_LAST_ENT_AT && PASS_LAST_ENT_AT + 8 <= PASS_RING_AT);
     }
 
-    /// The move cave: the on word, Instant Hit's mark on `+0xC`, the mover speed and carry-over
-    /// flag written, the count, then the jump into the mover; both checks jump to that jump.
+    /// What the pass cave keeps of the game's verdict, by the entity's type word (read live:
+    /// Azrael 0x110d, ground drone 0x1115, drone part 0x1106, turret 0x1117; dead +0x4000; the
+    /// world's own drone shadow 0x515).
+    #[test]
+    fn pass_keeps_drones_and_turrets() {
+        let keep = |t: u32| (t & ENEMY_MASK).wrapping_sub(ENEMY_FIRST) <= u32::from(ENEMY_SPAN);
+        for t in [0x110d, 0x1115, 0x1106, 0x1117, 0x111c, 0x1104] {
+            assert!(keep(t), "{t:#x}");
+        }
+        for t in [0x510d, 0x5117, 0x511c, 0x515, 0x1102, 0x1101, 0x1100, 0x100, 0x111a, 0] {
+            assert!(!keep(t), "{t:#x}");
+        }
+    }
+
+    /// Instant Hit's code: four jumps, all to its end; its fields; the new origin in our frame.
+    #[test]
+    fn instant_code_jumps_and_fields() {
+        let (cave, at) = (0x1_4000_0000u64, 0x1A0u64);
+        let c = instant_code(cave, at).unwrap();
+        let base = cave + at;
+        let rip_at = |k: usize| (base + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
+        let mut jumps = 0;
+        let mut i = 0;
+        while i + 6 <= c.len() {
+            if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x86) {
+                assert_eq!(rip_at(i + 2), base + c.len() as u64, "jump at {i}");
+                jumps += 1;
+                i += 6;
+            } else {
+                i += 1;
+            }
+        }
+        assert_eq!(jumps, 4);
+        assert_eq!(&c[..2], &[0x8B, 0x05]);
+        assert_eq!(rip_at(2), cave + ON_AT);
+        // Both Instant Hit and Magic Bullets: mov eax, [rip+feat]; and eax, 5; cmp eax, 5; jne.
+        let t = 14;
+        assert_eq!(&c[t..t + 2], &[0x8B, 0x05]);
+        assert_eq!(rip_at(t + 2), cave + FEAT_AT);
+        assert_eq!(&c[t + 6..t + 14], &[0x83, 0xE0, 5, 0x83, 0xF8, 5, 0x0F, 0x85]);
+        assert_eq!(PLACE_FEATS, 5);
+        let rip = |op: &[u8]| rip_at(c.windows(op.len()).position(|w| w == op).unwrap() + op.len());
+        assert_eq!(rip(&[0x0F, 0x54, 0x05]), cave + MASK_AT);
+        assert_eq!(rip(&[0x0F, 0x10, 0x15]), cave + TARGET_AT);
+        assert_eq!(rip(&[0x0F, 0x54, 0x15]), cave + MASK_AT);
+        assert_eq!(rip(&[0xF3, 0x0F, 0x5C, 0x15]), cave + ONE_AT);
+        assert_eq!(rip(&[0xF0, 0xFF, 0x05]), cave + PLACED_AT);
+        // The last instructions: the slot written, rdx at it, the count.
+        let n = c.len();
+        assert_eq!(&c[n - 17..n - 7], &[0x0F, 0x11, 0x4C, 0x24, 0x58, 0x48, 0x8D, 0x54, 0x24, 0x58]);
+    }
+
+    /// The move cave: the on word, the player's-shot check (seven near jumps, all to TAIL), the
+    /// mover speed and carry-over flag written, the count, then the jump into the mover.
     #[test]
     fn move_code_marks_and_jumps() {
-        let (cave, orig) = (0x7ff6_1000_0000u64, 0x7ff6_136b_1c30u64);
-        let c = move_code(cave, orig);
+        let (cave, orig, root) = (0x7ff6_1000_0000u64, 0x7ff6_136b_1c30u64, 0x7ff6_0a00_0000u64);
+        let c = move_code(cave, orig, root);
         assert!(c.len() as u64 <= MOVE_ON_AT, "{} bytes", c.len());
-        assert!(MOVE_COUNT_AT + 4 <= MOVE_BLOCK as u64);
+        assert!(MOVE_LAST_SHOT_AT + 8 <= MOVE_BLOCK as u64);
         let rel_at = |k: usize| (cave + k as u64 + 4).wrapping_add_signed(i64::from(i32::from_le_bytes(c[k..k + 4].try_into().unwrap())));
+        let find = |w: &[u8]| c.windows(w.len()).position(|x| x == w).unwrap();
         assert_eq!(&c[..2], &[0x8B, 0x05]);
         assert_eq!(rel_at(2), cave + MOVE_ON_AT);
         let tail = c.len() - 5;
         assert_eq!(c[tail], 0xE9);
         assert_eq!(rel_at(tail + 1), orig);
-        assert_eq!(&c[6..10], &[0x85, 0xC0, 0x0F, 0x84]);
-        assert_eq!(rel_at(10), cave + tail as u64);
-        assert_eq!(&c[14..17], &[0x81, 0x79, 0x0C]);
-        assert_eq!(u32::from_le_bytes(c[17..21].try_into().unwrap()), INSTANT_SPEED.to_bits());
-        assert_eq!(&c[21..23], &[0x0F, 0x85]);
-        assert_eq!(rel_at(23), cave + tail as u64);
-        assert_eq!(&c[27..30], &[0xC7, 0x41, 0x10]);
-        assert_eq!(u32::from_le_bytes(c[30..34].try_into().unwrap()), INSTANT_MOVE.to_bits());
-        assert_eq!(&c[34..41], &[0xC6, 0x81, 0x74, 0x03, 0x00, 0x00, 0x01]);
-        assert_eq!(&c[41..44], &[0xF0, 0xFF, 0x05]);
-        assert_eq!(rel_at(44), cave + MOVE_COUNT_AT);
-        assert_eq!(tail, 48);
+        let speed = find(&[0xC7, 0x41, 0x10]);
+        let mut jumps = 0;
+        for i in 0..speed {
+            if c[i] == 0x0F && matches!(c[i + 1], 0x84 | 0x85 | 0x8D) {
+                assert_eq!(rel_at(i + 2), cave + tail as u64, "jump at {i}");
+                jumps += 1;
+            }
+        }
+        assert_eq!(jumps, 7);
+        assert_eq!(&c[14..17], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(17), cave + MOVE_CALLS_AT);
+        assert_eq!(&c[21..28], &[0x48, 0x8B, 0x81, 0x90, 0, 0, 0]);
+        let k = find(&[0x49, 0xBA]) + 2;
+        assert_eq!(u64::from_le_bytes(c[k..k + 8].try_into().unwrap()), root);
+        assert_eq!(&c[k + 8..k + 11], &[0x49, 0x3B, 0x02]);
+        let g = find(&[0x80, 0x79, 0x21, 0x00]);
+        assert_eq!(&c[g + 4..g + 6], &[0x0F, 0x85]);
+        assert_eq!(&c[g + 10..g + 14], &[0x80, 0x79, 0x1C, 0x00]);
+        let l = g + 20;
+        assert_eq!(&c[l..l + 5], &[0x8B, 0x41, 0x0C, 0x89, 0x05]);
+        assert_eq!(rel_at(l + 5), cave + MOVE_LAST_SPEED_AT);
+        assert_eq!(&c[l + 9..l + 12], &[0x48, 0x89, 0x0D]);
+        assert_eq!(rel_at(l + 12), cave + MOVE_LAST_SHOT_AT);
+        assert_eq!(speed, l + 16);
+        assert_eq!(u32::from_le_bytes(c[speed + 3..speed + 7].try_into().unwrap()), INSTANT_MOVE.to_bits());
+        assert_eq!(&c[speed + 7..speed + 14], &[0xC6, 0x81, 0x74, 0x03, 0x00, 0x00, 0x01]);
+        assert_eq!(&c[speed + 14..speed + 17], &[0xF0, 0xFF, 0x05]);
+        assert_eq!(rel_at(speed + 17), cave + MOVE_COUNT_AT);
+        assert_eq!(speed + 21, tail);
     }
 
     /// Priority: crosshair, nearest, farthest; the circle and the range still limit all three.

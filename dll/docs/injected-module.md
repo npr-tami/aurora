@@ -190,15 +190,12 @@ Everything in `%APPDATA%\Aurora` except `Bin\aurora.dll` (the Launchpad's): `Pro
 | Caves never freed, never call the DLL | `memory::alloc_code_near`, every `cave_code` |
 | The player's character only (Undetected: enemy NPC sight; documented exception) | owner checks in every cave |
 | Never edits game files; never Ghost Coins | nothing writes under the game folder |
-| No anti-cheat evasion, no hiding the mod, no multiplayer use | the DLL is loaded with `LoadLibraryW` and stays in the module list; there is no code for any of those |
+| DLL loading and module visibility | The DLL is loaded using `LoadLibraryW` and remains registered in the process module list while loaded. |
 
 ## 8. Where to look when something goes wrong
 1. `%APPDATA%\Aurora\Dumper\dll.log` – start line, `code searches done`, every pattern miss, every hold on/off/dropped, every patch on/off/left alone, freeze guard reports, the unload steps. Beside it, `flytrace.log`: what the game did to the player around a Fly off.
 2. `%APPDATA%\Aurora\Bin\hook.txt` – where the drawing hook went, or why it failed.
 3. `%APPDATA%\Aurora\Bin\Cache\Offsets.bin` – what was found for this build. Deleting it only costs one slow start.
-
-## 9. Not covered
-- Two things are *not* in the code and are *not* documented, because they are outside this project's rules: getting round the exe's copy protection or integrity checks (the early-inject note mentions they could be tripped; the answer there is to wait until the code is ready, never to work around them), and anything that hides the module or targets multiplayer or anti-cheat.
 
 ## The wait for the go
 After `DllMain` has started the start thread and logged "attached", the thread waits on `GO` (a mutex and condvar in `lib.rs`) for up to 15 s (`GO_WAIT`) before anything else: no drawing hook, no menu, no warm-up, no pipe. Two exports, run by the Launchpad on short threads it starts in the game (the way it runs LoadLibraryW):

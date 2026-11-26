@@ -176,6 +176,8 @@ fn serve(file: File) -> bool {
             let _ = crate::unseen::set(false);
             let _ = crate::inbox::set(false);
             let _ = crate::nvgzone::set(false);
+            step("discord");
+            crate::discord::shutdown();
             step("silent aim");
             crate::silentaim::shutdown();
             step("weapon");

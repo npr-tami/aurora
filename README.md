@@ -9,7 +9,7 @@ Aurora is made for PvE. It does not touch anti-cheat, network or account code, a
 - In-game menu drawn into the game's own frames, with hotkeys, profiles and a command box
 - ESP (boxes, bones, names, distance)
 - God mode, Fly, Fly Through Everything, teleports
-- No Recoil, No Spread, Infinite Mag, Damage Multiplier, Fire Rate, Silent Aim (NPCs only)
+- No Recoil, No Spread, Infinite Mag, Damage Multiplier, Fire Rate
 - Gear Score and Credits editors
 - Undetected (enemy NPC sight only), NVG options
 - Unloads cleanly from its own menu
@@ -53,7 +53,7 @@ docs/        architecture overview
 
 ## Disclaimer
 
-Not affiliated with or endorsed by Ubisoft. Use at your own risk. Do not use it in PvP.
+Not affiliated with or endorsed by Ubisoft. Use at your own risk.
 
 ## License
 

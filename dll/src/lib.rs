@@ -5,6 +5,7 @@
 mod airwalk;
 mod credits;
 mod dinput;
+mod discord;
 mod entities;
 mod fly;
 mod gearscore;

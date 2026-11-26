@@ -42,8 +42,9 @@ enum Page {
     Credits,
     /// Self > Weapons.
     Weapon,
-    /// Aurora > Experiments > Silent Aim: all its rows in one list. It was in Self > Weapons until
-    /// the player moved it into Experiments.
+    /// Self > Weapons > Weapon Modifications.
+    WeaponMods,
+    /// Retained for history and internal compatibility, but intentionally not exposed in the menu.
     SilentAim,
     Teleport,
     World,
@@ -96,6 +97,8 @@ enum Page {
     CtxKey(u32),
     /// Menu > Saved Commands.
     Saved,
+    /// Aurora > Settings > Discord: the Discord status.
+    Discord,
     /// Menu > Commands With Non-Default State, as Stand's.
     NonDefault,
     /// Menu > Hotkey List: every hotkey in one place.
@@ -120,6 +123,7 @@ fn page_name(p: Page) -> String {
         Page::Movement => "Movement".into(),
         Page::Fly => "Fly".into(),
         Page::Weapon => "Weapons".into(),
+        Page::WeaponMods => "Weapon Modifications".into(),
         Page::SilentAim => "Silent Aim".into(),
         Page::Progress => "Progress".into(),
         Page::Editor => "Editor".into(),
@@ -156,6 +160,7 @@ fn page_name(p: Page) -> String {
         Page::RowHotkeys => "Hotkeys".into(),
         Page::CtxKey(vk) => key_name(vk),
         Page::Saved => "Saved Commands".into(),
+        Page::Discord => "Discord".into(),
         Page::NonDefault => "Commands With Non-Default State".into(),
         Page::HotkeyList => "Hotkeys".into(),
         Page::Unload => "Unload Aurora".into(),
@@ -191,6 +196,11 @@ enum Id {
     /// Game > Disables > NVG In Erewhon: in hubs the player's goggles group runs in the hub's
     /// goggles leaf's place, so the player's NVG key puts them on. Off by default.
     NvgZone,
+    /// Aurora > Settings > Discord: the status on or off, and its picture: the game's art with the
+    /// Aurora logo in its corner, or the logo alone (both off: no picture).
+    DiscordStatus,
+    DiscordGamePic,
+    DiscordAPic,
     NoRecoil,
     NoShake,
     /// Game > Rendering > No NVG Overlay: goggles down, no green screen.
@@ -212,11 +222,10 @@ enum Id {
     /// Silent Aim > Show FOV Circle and Priority.
     SilentCircle,
     SilentPriority,
-    /// Self > Weapons > Magic Bullets and No Bullet Drop (they ride Silent Aim's hook, so they live
-    /// in `silentaim.rs`).
+    /// Self > Weapons > Weapon Modifications: projectile switches implemented in `silentaim.rs`.
     SilentMagic,
     SilentNoDrop,
-    /// Silent Aim > No Range Loss, Instant Hit.
+    /// Hidden legacy No Range Loss and the standalone Instant Hit switch.
     SilentNoRange,
     SilentInstant,
     GearValue,
@@ -1313,21 +1322,21 @@ fn items_of(page: Page, prefs: Prefs) -> Vec<Item> {
             item(Id::PickOther, "Pick Other Points", Kind::Sub, "Open a shop within 20 s.\nPick the amount you want.\nCredits then changes that one."),
         ],
         Page::Weapon => vec![
-            item(Id::NoRecoil, "No Recoil", Kind::Toggle(crate::weapon::recoil_on()), ""),
-            item(Id::Accuracy, "No Spread", Kind::Toggle(crate::weapon::accuracy_on()), ""),
-            // No Bullet Drop under No Spread and Magic Bullets under it; No Scoped Sway over Infinite
-            // Mag, Infinite Reserve under it.
-            item(Id::SilentNoDrop, "No Bullet Drop", Kind::Toggle(crate::silentaim::no_drop()), "Your shots fly straight, with no drop over distance.
-All your shots, Silent Aim on or off."),
-            item(Id::SilentMagic, "Magic Bullets", Kind::Toggle(crate::silentaim::magic()), "Your shots go through anything in the way
-and hit whatever is in your crosshair, whoever it is."),
-            item(Id::NoSway, "No Scoped Sway", Kind::Toggle(crate::weapon::sway_on()), ""),
+            item(Id::Open(Page::WeaponMods), "Weapon Modifications", Kind::Sub, ""),
             item(Id::Ammo, "Infinite Mag", Kind::Toggle(crate::weapon::ammo_on()), ""),
             item(Id::Reserve, "Infinite Reserve", Kind::Toggle(crate::weapon::reserve_on()), ""),
             item(Id::Damage, "Damage Multiplier", Kind::Choice(damage_text()), ""),
             item(Id::FireRate, "Fire Rate", Kind::Choice(fire_text()), ""),
         ],
-        // All of Silent Aim in one list, opened from Experiments.
+        Page::WeaponMods => vec![
+            item(Id::NoRecoil, "No Recoil", Kind::Toggle(crate::weapon::recoil_on()), ""),
+            item(Id::Accuracy, "No Spread", Kind::Toggle(crate::weapon::accuracy_on()), ""),
+            item(Id::SilentNoDrop, "No Bullet Drop", Kind::Toggle(crate::silentaim::no_drop()), "Your shots fly straight, with no drop over distance."),
+            item(Id::SilentMagic, "Magic Bullets", Kind::Toggle(crate::silentaim::magic()), "Your shots pass through obstacles and hit the first character along their original path."),
+            item(Id::SilentInstant, "Instant Hit", Kind::Toggle(crate::silentaim::instant()), "Your shots land the moment you fire\non the AI soldier or drone in your crosshair."),
+            item(Id::NoSway, "No Scoped Sway", Kind::Toggle(crate::weapon::sway_on()), ""),
+        ],
+        // Retained but inaccessible: Silent Aim is deliberately hidden from every menu path.
         Page::SilentAim => vec![
             item(Id::SilentAim, "Silent Aim", Kind::Toggle(crate::silentaim::is_on()), "Your shots go to an AI soldier or drone inside the circle.
 Never players, co-op players included. Never animals."),
@@ -1337,10 +1346,6 @@ Never players, co-op players included. Never animals."),
 What is inside it can be picked."),
             item(Id::SilentPriority, "Priority", Kind::Choice(crate::silentaim::priority().name().into()), "Which target inside the circle goes first:
 Crosshair (nearest the crosshair), Nearest or Farthest from you."),
-            item(Id::SilentNoRange, "No Range Loss", Kind::Toggle(crate::silentaim::no_range()), "Your shots keep their damage at any distance.
-Not while a player is near your crosshair. Needs Silent Aim on."),
-            item(Id::SilentInstant, "Instant Hit", Kind::Toggle(crate::silentaim::instant()), "Your shots arrive at once.
-Not while a player is near your crosshair. Needs Silent Aim on."),
         ],
         Page::Fly => {
             let k = crate::keys::get();
@@ -1530,6 +1535,15 @@ Not while a player is near your crosshair. Needs Silent Aim on."),
             item(Id::Open(Page::Rendering), "Rendering", Kind::Sub, ""),
             item(Id::Open(Page::Progress), "Progress", Kind::Sub, ""),
         ],
+        // The two pictures are one choice: turning one on turns the other off.
+        Page::Discord => {
+            let pic = crate::discord::picture();
+            vec![
+                item(Id::DiscordStatus, "Discord Status", Kind::Toggle(crate::discord::is_on()), ""),
+                item(Id::DiscordGamePic, "Game Art With Aurora Logo", Kind::Toggle(pic == crate::discord::Picture::GameWithA), ""),
+                item(Id::DiscordAPic, "Logo Only", Kind::Toggle(pic == crate::discord::Picture::AOnly), ""),
+            ]
+        }
         // Restrictions turned off: the old "No..." rows, by what they disable. No help lines here.
         // Checked both are a game restriction turned off, so both stay.
         Page::Disables => vec![
@@ -1561,6 +1575,7 @@ Not while a player is near your crosshair. Needs Silent Aim on."),
             item(Id::Open(Page::Appearance), "Appearance", Kind::Sub, ""),
             item(Id::Open(Page::Notifications), "Notifications", Kind::Sub, ""),
             item(Id::Open(Page::Warnings), "Warnings", Kind::Sub, ""),
+            item(Id::Open(Page::Discord), "Discord", Kind::Sub, ""),
             // Under the lists, off by default.
             item(Id::MouseSupport, "Mouse Support", Kind::Toggle(prefs.mouse_support), "Use the mouse in the menu."),
             // Under Mouse Support, off by default.
@@ -1634,9 +1649,8 @@ Not while a player is near your crosshair. Needs Silent Aim on."),
             if v.is_empty() { vec![item(Id::Info, "No matching commands", Kind::Info, "")] } else { v }
         }
         // Untested switches live here until a test proves them. Fly Water Fixes: the water snap
-        // after Fly off. Silent Aim's list came from Self > Weapons.
+        // after Fly off.
         Page::Experiments => vec![
-            item(Id::Open(Page::SilentAim), "Silent Aim", Kind::Sub, ""),
             item(Id::UnseenInbox, "Ignore only me (untested)", Kind::Toggle(crate::inbox::is_on()), "Enemies drop what they sense of you only.\nNot tested: leave off."),
             item(Id::Header, "Fly Water Fixes", Kind::Header, ""),
             item(Id::FlyCalm, "Wait For Calm (untested)", Kind::Toggle(fly::calm()), "At Fly off, holds you until the\ngame stops pulling you (1.5 s max)."),
@@ -1992,7 +2006,10 @@ fn activate(st: &mut State, it: &Item) {
             switched(st, crate::silentaim::set_magic(on), if on { "Magic bullets on" } else { "Magic bullets off" });
         }
         Id::SilentNoRange => crate::silentaim::set_no_range(!crate::silentaim::no_range()),
-        Id::SilentInstant => crate::silentaim::set_instant(!crate::silentaim::instant()),
+        Id::SilentInstant => {
+            let on = !crate::silentaim::instant();
+            switched(st, crate::silentaim::set_instant(on), if on { "Instant hit on" } else { "Instant hit off" });
+        }
         Id::SilentNoDrop => {
             let on = !crate::silentaim::no_drop();
             switched(st, crate::silentaim::set_no_drop(on), if on { "No bullet drop on" } else { "No bullet drop off" });
@@ -2004,6 +2021,18 @@ fn activate(st: &mut State, it: &Item) {
         Id::UnseenInbox => {
             let on = !crate::inbox::is_on();
             switched(st, crate::inbox::set(on), if on { "Ignore only me on" } else { "Ignore only me off" });
+        }
+        Id::DiscordStatus => {
+            let on = !crate::discord::is_on();
+            switched(st, crate::discord::set(on), if on { "Discord status on" } else { "Discord status off" });
+        }
+        Id::DiscordGamePic | Id::DiscordAPic => {
+            use crate::discord::Picture;
+            let pic = if it.id == Id::DiscordGamePic { Picture::GameWithA } else { Picture::AOnly };
+            let on = crate::discord::picture() != pic;
+            crate::discord::set_picture(if on { pic } else { Picture::None });
+            let name = if pic == Picture::GameWithA { "Game art with Aurora logo" } else { "Logo only" };
+            done(st, format!("{name} {}", if on { "on" } else { "off" }));
         }
         Id::NvgZone => {
             let on = !crate::nvgzone::is_on();
@@ -3855,6 +3884,9 @@ fn command(id: Id) -> Option<String> {
         Id::FlyGuard => "flysnapguard",
         Id::FlyLetFall => "flyletgamefall",
         Id::NvgZone => "nvginerewhon",
+        Id::DiscordStatus => "discordstatus",
+        Id::DiscordGamePic => "discordgameartwithlogo",
+        Id::DiscordAPic => "discordlogoonly",
         Id::NoRecoil => "norecoil",
         Id::NoShake => "noscreenshake",
         Id::NoNvgOverlay => "nonvgoverlay",
@@ -4605,6 +4637,13 @@ const MOVED: &[(&str, &str)] = &[
     ("Self > Weapons > Silent Aim Range", "Self > Weapons > Silent Aim > Silent Aim Range"),
     // Then the list went into Experiments.
     ("Self > Weapons > Silent Aim", "Aurora > Experiments > Silent Aim"),
+    // Weapon Modifications is a list under Self > Weapons. Existing hotkeys and profiles follow
+    // the rows into it; MOVED_EXACT handles older Magic Bullets and Instant Hit addresses.
+    ("Self > Weapons > No Recoil", "Self > Weapons > Weapon Modifications > No Recoil"),
+    ("Self > Weapons > No Spread", "Self > Weapons > Weapon Modifications > No Spread"),
+    ("Self > Weapons > No Bullet Drop", "Self > Weapons > Weapon Modifications > No Bullet Drop"),
+    ("Self > Weapons > Magic Bullets", "Self > Weapons > Weapon Modifications > Magic Bullets"),
+    ("Self > Weapons > No Scoped Sway", "Self > Weapons > Weapon Modifications > No Scoped Sway"),
     // Infinite Stamina went into Movement and back to Self, so "Self > Infinite Stamina" is its
     // place again (see the top). ESP's Show and Look are Targets and Drawing, Colour is Colours.
     ("World > ESP > Show", "World > ESP > Targets"),
@@ -4813,6 +4852,12 @@ const GONE: &[(&str, &str)] = &[
 ];
 /// Their old commands, typed or in a command.request script, and the line they get.
 const GONE_COMMANDS: &[(&str, &str)] = &[
+    ("silentaim", "Silent Aim is hidden and unavailable"),
+    ("silentaimfov", "Silent Aim is hidden and unavailable"),
+    ("silentaimrange", "Silent Aim is hidden and unavailable"),
+    ("silentaimcircle", "Silent Aim is hidden and unavailable"),
+    ("silentaimpriority", "Silent Aim is hidden and unavailable"),
+    ("norangeloss", "No Range Loss was removed"),
     ("standwhileflying", "Stand While Flying is always on while Fly is on"),
     ("menusize", "Menu Size is now List Width and List Height"),
     ("suppressgenericresponsesmenu", "The menu never shows plain replies now"),
@@ -4839,10 +4884,12 @@ static GONE_SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Rows that moved down into a list of their own name (only the address itself, since every row in
 /// the new list starts with the old address), and a row that left its list on its own.
-const MOVED_EXACT: [(&str, &str); 2] = [
+const MOVED_EXACT: [(&str, &str); 3] = [
     ("Self > Progress > Credits", "Self > Progress > Credits > Credits"),
     // Magic Bullets left Silent Aim's list for Weapons: all shots, no Silent Aim needed.
     ("Aurora > Experiments > Silent Aim > Magic Bullets", "Self > Weapons > Magic Bullets"),
+    // Instant Hit is a standalone weapon modification now, with no Silent Aim dependency.
+    ("Aurora > Experiments > Silent Aim > Instant Hit", "Self > Weapons > Weapon Modifications > Instant Hit"),
 ];
 
 /// Where a row that moved lives now; None when it did not move. A row that moved more than once
@@ -5165,6 +5212,10 @@ fn default_of(st: &mut State, id: Id) {
         Id::NvgZone => {
             let _ = crate::nvgzone::set(false);
         }
+        Id::DiscordStatus => {
+            let _ = crate::discord::set(false);
+        }
+        Id::DiscordGamePic | Id::DiscordAPic => crate::discord::set_picture(crate::discord::Picture::None),
         Id::NoRecoil => {
             let _ = crate::weapon::set_recoil(false);
         }
@@ -5205,7 +5256,9 @@ fn default_of(st: &mut State, id: Id) {
             let _ = crate::silentaim::set_magic(false);
         }
         Id::SilentNoRange => crate::silentaim::set_no_range(false),
-        Id::SilentInstant => crate::silentaim::set_instant(false),
+        Id::SilentInstant => {
+            let _ = crate::silentaim::set_instant(false);
+        }
         Id::SilentNoDrop => {
             let _ = crate::silentaim::set_no_drop(false);
         }
@@ -5277,7 +5330,7 @@ fn default_of(st: &mut State, id: Id) {
 fn has_default(id: Id) -> bool {
     matches!(
         id,
-        Id::God | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Damage | Id::FireRate | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentFov | Id::SilentRange | Id::SilentCircle | Id::SilentPriority | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::Fly | Id::FlySpeed | Id::FlySprint | Id::HopUp | Id::HopHeight | Id::SafeFly | Id::GearValue | Id::Coord(_) | Id::EspOn | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::EspDistance | Id::EspEdge | Id::EspBones | Id::EspRange | Id::EspLines | Id::EspColour(_) | Id::MenuColour | Id::PosX | Id::PosY | Id::MoveMouse | Id::MouseSupport | Id::Experimental | Id::Layout(_) | Id::ToastPosition | Id::ToastColour | Id::BackColour | Id::NotifyX | Id::NotifyY | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::ForceRead | Id::SkipAccepted
+        Id::God | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::DiscordStatus | Id::DiscordGamePic | Id::DiscordAPic | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Damage | Id::FireRate | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentFov | Id::SilentRange | Id::SilentCircle | Id::SilentPriority | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::Fly | Id::FlySpeed | Id::FlySprint | Id::HopUp | Id::HopHeight | Id::SafeFly | Id::GearValue | Id::Coord(_) | Id::EspOn | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::EspDistance | Id::EspEdge | Id::EspBones | Id::EspRange | Id::EspLines | Id::EspColour(_) | Id::MenuColour | Id::PosX | Id::PosY | Id::MoveMouse | Id::MouseSupport | Id::Experimental | Id::Layout(_) | Id::ToastPosition | Id::ToastColour | Id::BackColour | Id::NotifyX | Id::NotifyY | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::ForceRead | Id::SkipAccepted
     )
 }
 
@@ -5727,7 +5780,7 @@ fn colour_state(c: [u8; 3]) -> String {
 fn default_state(id: Id) -> Option<String> {
     let d = aurora_core::proto::EspStyle::DEFAULT;
     Some(match id {
-        Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::EspOn | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::MoveMouse | Id::MouseSupport | Id::Experimental => on_off(false),
+        Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::FlyCalm | Id::FlyGuard | Id::FlyLetFall | Id::NvgZone | Id::DiscordStatus | Id::DiscordGamePic | Id::DiscordAPic | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoRange | Id::SilentInstant | Id::SilentNoDrop | Id::EspOn | Id::QuietBox | Id::QuietKey | Id::AutoBox | Id::AutoKey | Id::MoveMouse | Id::MouseSupport | Id::Experimental => on_off(false),
         Id::SafeFly | Id::SilentCircle | Id::HopUp | Id::EspEnemies | Id::EspFriendlies | Id::EspPlayers | Id::EspDrones | Id::EspHideDead | Id::ForceRead | Id::SkipAccepted => on_off(true),
         Id::EspDistance => on_off(d.labels),
         Id::EspEdge => on_off(d.edge),
@@ -6337,7 +6390,7 @@ fn unwait(id: Id) -> bool {
 /// Switches that work on the player's character or hook the game's code: not before the player is
 /// in the world and the start-up code searches are done (the launcher's writes wait for the same).
 fn needs_world(id: Id) -> bool {
-    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoDrop | Id::Damage | Id::FireRate)
+    matches!(id, Id::God | Id::Fly | Id::Unseen | Id::UnseenInbox | Id::NvgZone | Id::NoRecoil | Id::NoShake | Id::NoNvgOverlay | Id::NoSway | Id::Stamina | Id::Accuracy | Id::Ammo | Id::Reserve | Id::SilentAim | Id::SilentMagic | Id::SilentNoDrop | Id::SilentInstant | Id::Damage | Id::FireRate)
 }
 
 fn world_ready() -> bool {
@@ -6939,17 +6992,21 @@ mod tests {
         use Pic::*;
         // 1 Self.png Lists on top.
         rows_are(Page::SelfTab, &[("Movement", Sub), ("Weapons", Sub), ("God Mode", Tog), ("Infinite Stamina", Tog), ("Undetected", Tog)]);
-        // Silent Aim's list went to Experiments.
+        // Six weapon changes live in one submenu. Silent Aim is no longer visible.
         rows_are(Page::Weapon, &[
-            ("No Recoil", Tog),
-            ("No Spread", Tog),
-            ("No Bullet Drop", TogIs(false)),
-            ("Magic Bullets", TogIs(false)),
-            ("No Scoped Sway", Tog),
+            ("Weapon Modifications", Sub),
             ("Infinite Mag", Tog),
             ("Infinite Reserve", Tog),
             ("Damage Multiplier", ValIs("Off")),
             ("Fire Rate", ValIs("Off")),
+        ]);
+        rows_are(Page::WeaponMods, &[
+            ("No Recoil", Tog),
+            ("No Spread", Tog),
+            ("No Bullet Drop", TogIs(false)),
+            ("Magic Bullets", TogIs(false)),
+            ("Instant Hit", TogIs(false)),
+            ("No Scoped Sway", Tog),
         ]);
         rows_are(Page::SilentAim, &[
             ("Silent Aim", TogIs(false)),
@@ -6957,8 +7014,6 @@ mod tests {
             ("Silent Aim Range", ValIs("300 m")),
             ("Show FOV Circle", TogIs(true)),
             ("Priority", ValIs("Crosshair")),
-            ("No Range Loss", TogIs(false)),
-            ("Instant Hit", TogIs(false)),
         ]);
         rows_are(Page::Movement, &[("Fly", Sub)]);
         // Hop Up and Hop Height after Sprint, no Stand While Flying.
@@ -6971,7 +7026,7 @@ mod tests {
         rows_are(Page::Editor, &[("Gear Score", Sub), ("Credits", Sub)]);
         // 3 Settings.png Mouse Support under the lists, off; Enable Experimental Features under it,
         // off.
-        rows_are(Page::MenuSettings, &[("Appearance", Sub), ("Notifications", Sub), ("Warnings", Sub), ("Mouse Support", TogIs(false)), ("Enable Experimental Features", TogIs(false))]);
+        rows_are(Page::MenuSettings, &[("Appearance", Sub), ("Notifications", Sub), ("Warnings", Sub), ("Discord", Sub), ("Mouse Support", TogIs(false)), ("Enable Experimental Features", TogIs(false))]);
         // Stand's size rows straight in Appearance, lists first; no Menu Size.
         rows_are(Page::Appearance, &[
             ("Position", Sub),
@@ -7050,7 +7105,7 @@ mod tests {
         // starts with save or load (savemain / loadmain are the profiles').
         let mut seen = std::collections::HashSet::new();
         let pages = [
-            Page::SelfTab, Page::Weapon, Page::SilentAim, Page::Movement, Page::Fly, Page::Game, Page::Disables, Page::Rendering, Page::Progress,
+            Page::SelfTab, Page::Weapon, Page::WeaponMods, Page::SilentAim, Page::Movement, Page::Fly, Page::Game, Page::Disables, Page::Rendering, Page::Progress,
             Page::Editor, Page::World, Page::Esp, Page::EspTargets, Page::EspDrawing, Page::EspColours,
             Page::Menu, Page::MenuSettings, Page::Appearance, Page::Position, Page::MenuColours, Page::Tabs, Page::AddressBar,
             Page::Notifications, Page::NoteLook, Page::CustomPosition, Page::Timing, Page::Suppress, Page::Warnings, Page::AutoProceed,
@@ -7110,7 +7165,7 @@ mod tests {
         assert_eq!(default_state(Id::Experimental), Some(on_off(false)));
         assert!(has_default(Id::Experimental));
         // On from the menu: the warning first, with.
-        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 4, 0)];
+        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 5, 0)];
         FROM.store(FROM_MENU, Ordering::Relaxed);
         activate(&mut st, &f.item);
         assert!(!st.prefs.experimental, "not before Yes");
@@ -7133,12 +7188,12 @@ mod tests {
         st.stack = vec![(Page::Menu, 0, 0)];
         activate(&mut st, &open);
         assert_eq!(st.stack.last().unwrap().0, Page::Experiments);
-        // Silent Aim's list is in it, on top as every list.
-        assert_eq!(items(Page::Experiments, st.prefs)[0].id, Id::Open(Page::SilentAim));
+        // Silent Aim remains absent even while Experimental Features is on.
+        assert!(!items(Page::Experiments, st.prefs).iter().any(|i| i.id == Id::Open(Page::SilentAim)));
         // Off: an experiment that is on goes off, and Experiments closes, shown or behind another
         // tab.
         fly::set_calm(true);
-        st.stack = vec![(Page::Menu, 3, 0), (Page::Experiments, 0, 0), (Page::SilentAim, 1, 0)];
+        st.stack = vec![(Page::Menu, 3, 0), (Page::Experiments, 0, 0)];
         st.saved[3] = st.stack.clone();
         activate(&mut st, &f.item);
         assert!(!st.prefs.experimental);
@@ -7148,7 +7203,7 @@ mod tests {
         assert!(!shown(st.prefs));
         // Force Me To Read Warnings off: on at once, no page.
         st.prefs.force_read = false;
-        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 4, 0)];
+        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 5, 0)];
         activate(&mut st, &f.item);
         assert!(st.prefs.experimental);
         assert_eq!(st.stack.last().unwrap().0, Page::MenuSettings);
@@ -7166,15 +7221,15 @@ mod tests {
         assert!(hidden_experiment("Self > Weapons > Silent Aim > Silent Aim", off), "an old address too");
         assert!(!hidden_experiment("Aurora > Experiments > Silent Aim > Silent Aim", on));
         assert!(!hidden_experiment("Aurora > Settings > Mouse Support", off));
-        // Off closes Silent Aim's list also where Find opened it, and the Aurora list's picks move
-        // with their rows.
+        // Off closes experiment pages where Find opened them, and the Aurora list's picks move
+        // with their rows. The retained Silent Aim page is not reachable through Find.
         FROM.store(FROM_MENU, Ordering::Relaxed);
         activate(&mut st, &f.item);
         assert!(st.prefs.experimental);
         let row = |p: Prefs, i: usize| items(Page::Menu, p)[i].id;
         assert_eq!(row(st.prefs, 5), Id::Open(Page::NonDefault));
         st.stack = vec![(Page::Menu, 5, 0), (Page::NonDefault, 0, 0)];
-        st.saved[3] = vec![(Page::Menu, 0, 0), (Page::Find, 2, 0), (Page::SilentAim, 1, 0)];
+        st.saved[3] = vec![(Page::Menu, 0, 0), (Page::Find, 2, 0), (Page::Experiments, 0, 0)];
         activate(&mut st, &f.item);
         assert!(!st.prefs.experimental);
         assert_eq!(st.stack, [(Page::Menu, 4, 0), (Page::NonDefault, 0, 0)]);
@@ -7186,7 +7241,7 @@ mod tests {
         assert!(st.prefs.experimental);
         assert_eq!(st.stack, [(Page::Menu, 4, 0)]);
         assert_eq!(row(st.prefs, 4), Id::Open(Page::Saved));
-        assert_eq!(experiment_pages(st.prefs), [Page::Experiments, Page::SilentAim]);
+        assert_eq!(experiment_pages(st.prefs), [Page::Experiments]);
         default_of(&mut st, Id::Experimental);
         assert!(!st.prefs.experimental);
     }
@@ -7489,9 +7544,14 @@ World
     fn weapon_rows_and_new_switches() {
         let prefs = test_prefs();
         let names: Vec<String> = items(Page::Weapon, prefs).into_iter().map(|i| i.row.text).collect();
-        assert_eq!(names, ["No Recoil", "No Spread", "No Bullet Drop", "Magic Bullets", "No Scoped Sway", "Infinite Mag", "Infinite Reserve", "Damage Multiplier", "Fire Rate"]);
+        assert_eq!(names, ["Weapon Modifications", "Infinite Mag", "Infinite Reserve", "Damage Multiplier", "Fire Rate"]);
+        let names: Vec<String> = items(Page::WeaponMods, prefs).into_iter().map(|i| i.row.text).collect();
+        assert_eq!(names, ["No Recoil", "No Spread", "No Bullet Drop", "Magic Bullets", "Instant Hit", "No Scoped Sway"]);
         let names: Vec<String> = items(Page::SilentAim, prefs).into_iter().map(|i| i.row.text).collect();
-        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority", "No Range Loss", "Instant Hit"]);
+        assert_eq!(names, ["Silent Aim", "Silent Aim FOV", "Silent Aim Range", "Show FOV Circle", "Priority"]);
+        assert!(!items(Page::Experiments, Prefs { experimental: true, ..prefs }).iter().any(|i| i.id == Id::Open(Page::SilentAim)));
+        assert!(!row_commands(Prefs { experimental: true, ..prefs }).iter().any(|c| c.0 == "silentaim"));
+        assert!(GONE_COMMANDS.iter().any(|g| g.0 == "silentaim"));
         assert_eq!(command(Id::SilentAim).as_deref(), Some("silentaim"));
         assert_eq!(command(Id::SilentFov).as_deref(), Some("silentaimfov"));
         assert_eq!(command(Id::SilentRange).as_deref(), Some("silentaimrange"));
@@ -7506,34 +7566,35 @@ World
         assert_eq!(default_state(Id::SilentPriority).as_deref(), Some("Crosshair"));
         assert!([Id::SilentAim, Id::SilentFov, Id::SilentRange, Id::SilentCircle, Id::SilentPriority].into_iter().all(has_default));
         assert!(!needs_world(Id::SilentCircle) && !needs_world(Id::SilentPriority));
-        // The shot switches: off at inject, their own commands.
-        for (id, c) in [(Id::SilentMagic, "magicbullets"), (Id::SilentNoRange, "norangeloss"), (Id::SilentInstant, "instanthit"), (Id::SilentNoDrop, "nobulletdrop")] {
+        // The user-facing shot switches: off at inject, their own commands.
+        for (id, c) in [(Id::SilentMagic, "magicbullets"), (Id::SilentInstant, "instanthit"), (Id::SilentNoDrop, "nobulletdrop")] {
             assert_eq!(command(id).as_deref(), Some(c));
             assert_eq!(default_state(id), Some(on_off(false)));
             assert!(has_default(id));
         }
-        // Old addresses (hotkeys, profiles) follow the rows into the list, and the list into
-        // Experiments.
+        // The old Silent Aim rows remain unreachable. The visible weapon rows retain their old
+        // addresses through the new submenu.
         assert_eq!(moved("Self > Weapons > Silent Aim FOV").as_deref(), Some("Aurora > Experiments > Silent Aim > Silent Aim FOV"));
         assert_eq!(moved("Self > Weapons > Silent Aim Range").as_deref(), Some("Aurora > Experiments > Silent Aim > Silent Aim Range"));
         // Magic Bullets came back out of the list into Weapons.
-        assert_eq!(moved("Self > Weapons > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Magic Bullets"));
-        assert_eq!(moved("Aurora > Experiments > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Magic Bullets"));
+        assert_eq!(moved("Self > Weapons > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Weapon Modifications > Magic Bullets"));
+        assert_eq!(moved("Aurora > Experiments > Silent Aim > Magic Bullets").as_deref(), Some("Self > Weapons > Weapon Modifications > Magic Bullets"));
         assert_eq!(moved("Self > Weapons > Silent Aim").as_deref(), Some("Aurora > Experiments > Silent Aim"));
-        assert_eq!(moved("Self > Weapons > No Recoil"), None);
+        assert_eq!(moved("Self > Weapons > No Recoil").as_deref(), Some("Self > Weapons > Weapon Modifications > No Recoil"));
+        assert_eq!(moved("Self > Weapons > Magic Bullets").as_deref(), Some("Self > Weapons > Weapon Modifications > Magic Bullets"));
+        assert_eq!(moved("Aurora > Experiments > Silent Aim > Instant Hit").as_deref(), Some("Self > Weapons > Weapon Modifications > Instant Hit"));
         let on = Prefs { experimental: true, ..prefs };
-        for (addr, id) in [
-            ("Aurora > Experiments > Silent Aim > Silent Aim", Id::SilentAim),
-            ("Aurora > Experiments > Silent Aim > Silent Aim FOV", Id::SilentFov),
-            ("Aurora > Experiments > Silent Aim > Instant Hit", Id::SilentInstant),
-        ] {
-            assert_eq!(resolve(addr, on).map(|f| f.item.id), Some(id), "{addr}");
-            assert!(resolve(addr, prefs).is_none(), "{addr} while off");
+        for addr in ["Aurora > Experiments > Silent Aim > Silent Aim", "Aurora > Experiments > Silent Aim > Silent Aim FOV"] {
+            assert!(resolve(addr, on).is_none(), "{addr} remains hidden even with experiments on");
         }
-        assert!(needs_world(Id::SilentAim) && needs_world(Id::SilentNoDrop) && needs_world(Id::SilentMagic) && !needs_world(Id::SilentFov));
+        assert!(needs_world(Id::SilentAim) && needs_world(Id::SilentNoDrop) && needs_world(Id::SilentMagic) && needs_world(Id::SilentInstant) && !needs_world(Id::SilentFov));
         // No Bullet Drop and Magic Bullets are weapon rows: there with the switch off, and kept in
         // profiles.
-        for (addr, id) in [("Self > Weapons > No Bullet Drop", Id::SilentNoDrop), ("Self > Weapons > Magic Bullets", Id::SilentMagic)] {
+        for (addr, id) in [
+            ("Self > Weapons > Weapon Modifications > No Bullet Drop", Id::SilentNoDrop),
+            ("Self > Weapons > Weapon Modifications > Magic Bullets", Id::SilentMagic),
+            ("Self > Weapons > Weapon Modifications > Instant Hit", Id::SilentInstant),
+        ] {
             let f = resolve(addr, prefs).expect(addr);
             assert_eq!(f.item.id, id);
             assert_eq!(profile_state(&f, prefs).as_deref(), Some("Off"), "{addr}");
@@ -7811,7 +7872,7 @@ World
         let on = Prefs { experimental: true, ..test_prefs() };
         let rows = all_rows(on);
         let inside: Vec<&Found> = rows.iter().filter(|f| in_experiments(&f.addr) && state_of(&f.item, on).is_some()).collect();
-        assert!(inside.len() >= 5, "Experiments rows with a state: {}", inside.len());
+        assert!(inside.len() >= 2, "Experiments rows with a state: {}", inside.len());
         for f in &inside {
             assert_eq!(profile_state(f, on), None, "{}", f.addr);
             assert!(default_state(f.item.id).is_some(), "{} has a default to start at", f.addr);
@@ -7843,13 +7904,11 @@ World
         let off = test_prefs();
         assert!(!off.experimental);
         let all = experiment_ids(off, EXPERIMENTS_ADDR, true);
-        for id in [Id::SilentAim, Id::SilentFov, Id::SilentRange, Id::SilentCircle, Id::SilentPriority, Id::FlyCalm] {
-            assert!(all.contains(&id), "{id:?} goes to its default at Load");
-        }
+        assert!(all.contains(&Id::FlyCalm), "FlyCalm goes to its default at Load");
         // Load State on one row: that row; on another list: none.
         let on = Prefs { experimental: true, ..off };
-        let circle = all_rows(on).into_iter().find(|f| f.item.id == Id::SilentCircle).expect("Show FOV Circle");
-        assert_eq!(experiment_ids(off, &circle.addr, false), [Id::SilentCircle]);
+        let calm = all_rows(on).into_iter().find(|f| f.item.id == Id::FlyCalm).expect("an experiment row");
+        assert_eq!(experiment_ids(off, &calm.addr, false), [Id::FlyCalm]);
         assert!(experiment_ids(off, "Aurora > Settings", true).is_empty());
     }
 
@@ -8038,11 +8097,11 @@ Game
     fn round_two_rows_keep_their_keys() {
         let m = |a: &str| moved(a);
         // The Weapon tab is Self > Weapons, older names too.
-        assert_eq!(m("Weapon > No Recoil").as_deref(), Some("Self > Weapons > No Recoil"));
+        assert_eq!(m("Weapon > No Recoil").as_deref(), Some("Self > Weapons > Weapon Modifications > No Recoil"));
         assert_eq!(m("Weapon > Unlimited Ammo").as_deref(), Some("Self > Weapons > Infinite Mag"));
-        assert_eq!(m("Weapon > No Zoomed Sway").as_deref(), Some("Self > Weapons > No Scoped Sway"));
-        assert_eq!(m("Settings > No Zoomed Sway").as_deref(), Some("Self > Weapons > No Scoped Sway"));
-        assert_eq!(m("Self > Weapons > No Recoil"), None);
+        assert_eq!(m("Weapon > No Zoomed Sway").as_deref(), Some("Self > Weapons > Weapon Modifications > No Scoped Sway"));
+        assert_eq!(m("Settings > No Zoomed Sway").as_deref(), Some("Self > Weapons > Weapon Modifications > No Scoped Sway"));
+        assert_eq!(m("Self > Weapons > Weapon Modifications > No Recoil"), None);
         assert_eq!(m("Weapons"), None);
         // Appearance > Toasts rows went to Menu > Settings > Notifications.
         let t = "Menu > Settings > Appearance > Toasts";
@@ -8412,7 +8471,7 @@ Game
         assert!(!Prefs::default().mouse_support);
         assert!(!menu_takes_mouse(&st, true), "off by default: no mouse taken");
         // On, from Menu > Settings with Enter (as the player's click would).
-        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 3, 0)];
+        st.stack = vec![(Page::Menu, 0, 0), (Page::MenuSettings, 4, 0)];
         press(&mut st, Key::Enter);
         assert!(st.prefs.mouse_support);
         assert!(menu_takes_mouse(&st, true));
@@ -8421,7 +8480,7 @@ Game
         assert!(!menu_takes_mouse(&st, true), "menu closed");
         st.open = true;
         // Off again with the menu open: the mouse is the game's at once.
-        assert!(mouse_click(&mut st, Some(Spot::Row(3)), false));
+        assert!(mouse_click(&mut st, Some(Spot::Row(4)), false));
         assert!(!st.prefs.mouse_support);
         assert!(!menu_takes_mouse(&st, true));
         // Saved like the other settings: its own address in profiles and Save/Load State, off for a
